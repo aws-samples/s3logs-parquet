@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "s3logs",
+    "s3logd",
+    "s3log-lambda-aggregator",
+    "s3log-lambda-transformer",
+]
