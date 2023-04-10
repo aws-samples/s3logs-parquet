@@ -683,6 +683,7 @@ pub struct S3LogTransform {
     stagging_root: String,
     stagging_dt_fmt: String,
     stagging_suffix: String,
+    parquet_root: String,
     prefix_fmt: String,
     schema: Schema,
     job_interval: u64,
@@ -752,6 +753,10 @@ impl S3LogTransform {
                     Some(&env::var("S3LOGS_STAGGING_FILE_SUFFIX")
                         .unwrap_or(S3LOGS_STAGGING_DEFAULT_FILE_SUFFIX.to_string()))
                 ).unwrap().to_string(),
+            parquet_root: fmt.or(
+                    Some(&env::var("S3LOGS_TRANSFORM_PARQUET_ROOT_PATH")
+                        .unwrap_or(S3LOGS_TRANSFORM_DEFAULT_PARQUET_ROOT_PATH.to_string()))
+                ).unwrap().to_string(),
             prefix_fmt: fmt.or(
                     Some(&env::var("S3LOGS_TRANSFORM_OUTPUT_PREFIX_FMT")
                         .unwrap_or(S3LOGS_TRANSFORM_DEFAULT_OUTPUT_PREFIX_FMT.to_string()))
@@ -811,6 +816,7 @@ impl S3LogTransform {
             stagging_root: self.stagging_root.clone(),
             stagging_dt_fmt: self.stagging_dt_fmt.clone(),
             stagging_suffix: self.stagging_suffix.clone(),
+            parquet_root: self.parquet_root.clone(),
             prefix_fmt: self.prefix_fmt.clone(),
             schema: self.schema.clone(),
             job_interval: self.job_interval,
@@ -1318,7 +1324,7 @@ impl S3LogTransform {
     }
 
     fn gen_parquet_filepath(&self, stagging_file: StaggingFile) -> String {
-        return format!("{}/{}_{}.{}.parquet", S3LOGS_TRANSFORM_DEFAULT_PARQUET_ROOT_PATH,
+        return format!("{}/{}_{}.{}.parquet", self.parquet_root,
                     stagging_file.orig_bucket(), stagging_file.datetime(),
                     Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
     }
