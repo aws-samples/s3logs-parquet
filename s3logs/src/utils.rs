@@ -580,8 +580,8 @@ impl S3LogAggregator {
 
         while next_bound <= align_last {
             let mut iter = logs.iter();
-            let idx = iter.position(|x| x.0 == next_bound);
 
+            let idx = iter.position(|x| x.0 >= next_bound);
             next_bound += self.stagging_second;
 
             if idx.is_none() {
