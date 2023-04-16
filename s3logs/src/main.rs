@@ -54,7 +54,8 @@ async fn cli_main(opt: SubCmd) -> Result<(), Error> {
             match cmd {
                 AggregateSubCmd::S3 {region, bucket, key, threads: _} => {
                     let parser = S3LogAggregator::new(&region, &bucket, &key, None, None, None, None);
-                    parser.process_s3().await?;
+                    let total = parser.process_s3().await?;
+                    println!("{} of lines processed", total);
                 },
                 AggregateSubCmd::Local {input, threads: _} => {
                     if input.len() == 1 && input.get(0).unwrap().is_dir() {
@@ -66,8 +67,11 @@ async fn cli_main(opt: SubCmd) -> Result<(), Error> {
                                     continue;
                                 }
                                 let parser = S3LogAggregator::new("", "", "", None, None, None, None);
-                                let res = parser.process_local(&entry.path().to_string_lossy()).await;
-                                println!("{:?}", res);
+                                if let Ok(total) = parser.process_local(&entry.path().to_string_lossy()).await {
+                                    println!("{} of lines processed for input {:?}", total, entry);
+                                } else {
+                                    println!("process failed input {:?}", entry);
+                                }
                             }
                         }
                         return Ok(());
@@ -76,7 +80,11 @@ async fn cli_main(opt: SubCmd) -> Result<(), Error> {
                     for file in input {
                         if file.is_file() {
                             let parser = S3LogAggregator::new("", "", "", None, None, None, None);
-                            let _ = parser.process_local(file.as_path().to_str().unwrap()).await;
+                            if let Ok(total) = parser.process_local(file.as_path().to_str().unwrap()).await {
+                                println!("{} of lines processed for input {}", total, file.display());
+                            } else {
+                                println!("process failed input {}", file.display());
+                            }
                         }
                     }
                 }

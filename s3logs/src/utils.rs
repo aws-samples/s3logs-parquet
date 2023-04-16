@@ -521,7 +521,7 @@ impl S3LogAggregator {
         StaggingFile::new_from_ts(orig_bucket, self.tz, ts).get_fullpath()
     }
 
-    pub async fn process_s3(&self) -> Result<(), Error> {
+    pub async fn process_s3(&self) -> Result<usize, Error> {
 
         let mut stat = TimeStats::new();
         info!("start to fetch object s3://{}/{} from region: {}", self.bucket, self.key, self.region);
@@ -531,22 +531,25 @@ impl S3LogAggregator {
         let lines = BufReader::new(stream.into_async_read()).lines();
         info!("object s3://{}/{} initialized download cost: {}", self.bucket, self.key, stat.elapsed());
 
-        self.process(lines).await?;
-        Ok(())
+        let total = self.process(lines).await?;
+        Ok(total)
     }
 
-    pub async fn process_local(&self, filename: &str) -> Result<(), Error> {
+    pub async fn process_local(&self, filename: &str) -> Result<usize, Error> {
 
         let ifile = tokio::fs::File::open(filename).await?;
         info!("start to process local file {}", filename);
 
         let lines = BufReader::with_capacity(self.file_buf_size, ifile).lines();
 
-        self.process(lines).await?;
-        Ok(())
+        let total = self.process(lines).await?;
+        Ok(total)
     }
 
-    async fn process<R>(&self, mut lines: Lines<R>) -> Result<(), Error>
+    /*
+     * @return - number of lines processed
+     */
+    async fn process<R>(&self, mut lines: Lines<R>) -> Result<usize, Error>
     where
         R: tokio::io::AsyncBufRead + Unpin
     {
@@ -606,12 +609,15 @@ impl S3LogAggregator {
 
         info!("finally we got {} of partitions, {} of log lines ready for stagging dispatch", partitioned.len(), sum);
 
-        self.dispatch(partitioned).await?;
+        let total = self.dispatch(partitioned).await?;
 
-        Ok(())
+        Ok(total)
     }
 
-    pub async fn dispatch(&self, parts: Vec<Vec<(TimeStamp, S3LogLine)>>) -> Result<(), Error> {
+    /*
+     * @return - number of lines processed
+     */
+    pub async fn dispatch(&self, parts: Vec<Vec<(TimeStamp, S3LogLine)>>) -> Result<usize, Error> {
 
         let files = parts.len();
 
@@ -631,7 +637,7 @@ impl S3LogAggregator {
         }
 
         info!("total {} of lines appending to {} stagging log file", total, files);
-        Ok(())
+        Ok(total)
     }
 
     pub async fn task_append_stagging(&self, lines: Vec<(TimeStamp, S3LogLine)>) -> Result<usize, Error> {

@@ -60,6 +60,7 @@ async fn s3_event_handler(record: S3EventRecord) -> Result<(), Error> {
                             body: format!("{:?}", res.unwrap_err()),
                         }));
     }
+    println!("{} {} of lines processed", key, res.unwrap());
 
     Ok(())
 }
@@ -110,7 +111,7 @@ async fn function_handler(event: LambdaEvent<SqsEvent>) -> Result<Value, Error> 
 
     let value = sqs_event_handler(event.payload).await?;
 
-    println!("return value: {:?}", value);
+    println!("lambda function handler return value: {:?}", value);
     Ok(value)
 }
 
