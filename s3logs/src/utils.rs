@@ -40,7 +40,7 @@ type OrigBucket = String;
 
 // what S3 default
 const S3_LOG_REGEX_FULL: &str = r#"\[(.+)\]|"([^"]+)"|([^\s""\[\]]+)"#;
-const S3_LOG_REGEX_TIMESTAMP: &str = r#"(\S+) (\S+) \[(.+)\]"#;
+const S3_LOG_REGEX_TIMESTAMP: &str = r#"(\S+) (\S+) \[([^\]]+)\]"#;
 const S3_LOG_REGEX_ORIG_BUCKET: &str = r#"(\S+) (\S+)"#;
 const S3_LOG_DATATIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
 
