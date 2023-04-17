@@ -990,8 +990,11 @@ impl S3LogTransform {
         false
     }
 
+    /*
+     * @return - (max fields of output, number of lines in output)
+     */
     fn parquet_writer_loop<W, R>(&self, schema: Arc<Schema>, mut writer: ArrowWriter<W>, mut lines: std::io::Lines<R>,
-            startpoint: TimeStamp, max_fields: usize) -> Result<usize, Error>
+            startpoint: TimeStamp, max_fields: usize) -> Result<(usize, usize), Error>
     where
         W: std::io::Write,
         R: std::io::BufRead
@@ -1002,6 +1005,7 @@ impl S3LogTransform {
         let mut max: usize = max_fields;
         let mut need_extend: bool = false;
         let mut take = lines.by_ref().take(self.writer_bulk_lines);
+        let mut total_lines = 0;
         loop {
             let v = take.filter_map(|l| {
                         let line = self.line_parser.extract_full(&l.unwrap(), false);
@@ -1034,7 +1038,7 @@ impl S3LogTransform {
             if v.len() == 0 {
                 if need_extend {
                     info!("fields need to be extend to {}", max);
-                    return Ok(max);
+                    return Ok((max, total_lines));
                 }
                 debug!("no more log lines, jump to invoke flush on parquet writer");
                 break;
@@ -1065,6 +1069,7 @@ impl S3LogTransform {
                     debug!("{} rows wrote - can not get memory usage", batch.num_rows());
                 }
             }
+            total_lines += batch.num_rows();
             take = lines.by_ref().take(self.writer_bulk_lines);
         }
         writer.flush()?;
@@ -1074,10 +1079,14 @@ impl S3LogTransform {
         writer.close()?;
         debug!("parquet file closed");
 
-        Ok(max_fields)
+        Ok((max_fields, total_lines))
     }
 
-    pub fn write_to_parquet(&self, (orig_bucket, ts): (OrigBucket, TimeStamp), files: Vec<StaggingFile>) -> Result<(Vec<std::fs::File>, String), Error> {
+    /*
+     * @return - (locked input files, output parquet file, total lines in output)
+     */
+    pub fn write_to_parquet(&self, (orig_bucket, ts): (OrigBucket, TimeStamp), files: Vec<StaggingFile>)
+            -> Result<(Vec<std::fs::File>, String, usize), Error> {
 
         let mut ofiles = Vec::new();
 
@@ -1139,8 +1148,10 @@ impl S3LogTransform {
         info!("start to read input file");
         let mut stat = TimeStats::new();
 
+        let mut total_lines;
         let max_fields = self.schema.fields().len();
-        let actual_max_fields = self.parquet_writer_loop(Arc::new(self.schema.clone()), writer, lines, ts, max_fields)?;
+        let (actual_max_fields, lines_done) = self.parquet_writer_loop(Arc::new(self.schema.clone()), writer, lines, ts, max_fields)?;
+        total_lines = lines_done;
         if actual_max_fields > max_fields {
 
             // we need to extend schema, let's start over again with new max fields
@@ -1160,12 +1171,13 @@ impl S3LogTransform {
 
             let concat2 = concat_path(vec_files);
             let lines = std::io::BufReader::with_capacity(self.file_buf_size, concat2).lines();
-            let _max = self.parquet_writer_loop(Arc::new(new_schema.clone()), writer, lines, ts, actual_max_fields)?;
+            let (_max, lines_done) = self.parquet_writer_loop(Arc::new(new_schema.clone()), writer, lines, ts, actual_max_fields)?;
+            total_lines = lines_done;
             assert!(actual_max_fields == _max);
         }
 
         info!("output parquet file at {}, cost: {}", parquet_filepath, stat.elapsed());
-        Ok((ofiles, parquet_filepath))
+        Ok((ofiles, parquet_filepath, total_lines))
     }
 
     pub fn transform_cleanup(&self, locked_files: Vec<std::fs::File>, files: Vec<StaggingFile>) -> Result<(), Error> {
@@ -1335,14 +1347,17 @@ impl S3LogTransform {
                     Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
     }
 
-    pub async fn transform_parquet(&self, (orig_bucket, ts): (OrigBucket, TimeStamp), files: Vec<StaggingFile>) -> Result<(), Error> {
+    /*
+     * @return - total lines in output
+     */
+    pub async fn transform_parquet(&self, (orig_bucket, ts): (OrigBucket, TimeStamp), files: Vec<StaggingFile>) -> Result<usize, Error> {
 
         info!("start transform {:?} from orig bucket {} at timestamp {} to parquet at thread {:?}",
             files.iter().map(|f| f.get_fullpath()).collect::<Vec<String>>(), orig_bucket, ts, std::thread::current().id());
         let copy_files: Vec<StaggingFile> = files.iter().map(|f| f.self_copy()).collect();
         let res = self.write_to_parquet((orig_bucket.clone(), ts), copy_files);
         match res {
-            Ok((flocks, parquet_filepath)) => {
+            Ok((flocks, parquet_filepath, total_lines)) => {
                 let tm = TransferManager::new(&self.region).await;
                 let tmp_file = StaggingFile::new_from_ts(&orig_bucket, self.tz, ts);
                 let s3_parquet_key = self.get_s3_parquet_key(tmp_file.datetime(), &parquet_filepath);
@@ -1359,10 +1374,12 @@ impl S3LogTransform {
                             }
                         }
                     }
-                    return self.transform_cleanup(flocks, files);
+                    self.transform_cleanup(flocks, files)?;
+                    return Ok(total_lines);
                 } else {
                     debug!("error occur: {:?}", res.err());
-                    return self.transform_recovery(files, Some(&parquet_filepath));
+                    self.transform_recovery(files, Some(&parquet_filepath))?;
+                    return Ok(0);
                 }
             },
             Err(err) => {
@@ -1371,16 +1388,17 @@ impl S3LogTransform {
                     },
                     _ => {
                         warn!("error occur: {:?}", err);
-                        return self.transform_recovery(files, None);
+                        self.transform_recovery(files, None)?;
+                        return Ok(0);
                     },
                 }
             },
         }
 
-        Ok(())
+        Ok(0)
     }
 
-    pub async fn process_stagging_dir(&self) -> Result<(), Error> {
+    pub async fn process_stagging_dir(&self) -> Result<usize, Error> {
 
         let files = self.scan_stagging().await?;
 
@@ -1399,15 +1417,18 @@ impl S3LogTransform {
             joins.push(join);
         }
 
+        let mut total_lines = 0;
         // ignore any error in parquet transform process
         for join in joins {
-            let _ = join.await;
+            if let Ok(lines) = join.await? {
+                total_lines += lines;
+            }
         }
 
-        Ok(())
+        Ok(total_lines)
     }
 
-    pub async fn process_single_file(&self, filename: &str) -> Result<(), Error> {
+    pub async fn process_single_file(&self, filename: &str) -> Result<usize, Error> {
 
         let stagging_file = StaggingFile::new_from_filename(filename);
 
@@ -1415,8 +1436,8 @@ impl S3LogTransform {
             return Err(Error::new(ErrorKind::InvalidInput, "invalid filename"));
         }
 
-        self.transform_parquet((stagging_file.orig_bucket.clone(), stagging_file.datetime_ts()), vec![stagging_file]).await?;
+        let total_lines = self.transform_parquet((stagging_file.orig_bucket.clone(), stagging_file.datetime_ts()), vec![stagging_file]).await?;
 
-        Ok(())
+        Ok(total_lines)
     }
 }

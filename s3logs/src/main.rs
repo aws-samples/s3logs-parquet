@@ -95,13 +95,15 @@ async fn cli_main(opt: SubCmd) -> Result<(), Error> {
             let trans = S3LogTransform::new(&region, &bucket, None, None, None);
 
             if input.is_none() {
-                let _ = trans.process_stagging_dir().await;
+                let total_lines = trans.process_stagging_dir().await?;
+                println!("transform task ended, {} lines processed", total_lines);
                 return Ok(());
             }
 
             let pathbuf = input.unwrap();
             if pathbuf.is_file() {
-                trans.process_single_file(pathbuf.file_name().unwrap().to_str().unwrap()).await?;
+                let total_lines = trans.process_single_file(pathbuf.file_name().unwrap().to_str().unwrap()).await?;
+                println!("transform task ended, {} lines processed", total_lines);
             } else {
                 panic!("invalid input");
             }
