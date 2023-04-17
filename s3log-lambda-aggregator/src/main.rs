@@ -75,13 +75,14 @@ async fn sqs_event_handler(event: SqsEvent) -> Result<Value, Error> {
             for s3rec in s3events.records {
                 let failed_message = failed_message.clone();
                 let message_id = record.message_id.as_ref().unwrap().clone();
+                failed_message.lock().unwrap().push(message_id.clone());
                 tasks.push(tokio::spawn(async move {
                     if let Ok(_) = s3_event_handler(s3rec).await {
-                    } else {
+                        // remove message in failed message vec
                         failed_message
                             .lock()
                             .unwrap()
-                            .push(message_id);
+                            .retain(|x| *x != message_id);
                     }
                 }));
             }
