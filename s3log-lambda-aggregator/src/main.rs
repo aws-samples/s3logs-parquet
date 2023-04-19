@@ -114,10 +114,8 @@ async fn function_handler(event: LambdaEvent<SqsEvent>) -> Result<Value, Error> 
 
     let failed = value["batchItemFailures"].as_array().unwrap();
 
-    if failed.len() == 0 {
-        println!("all messages processed, lambda function handler return");
-    } else {
-        println!("lambda function handler return batch failed: {:?}", failed);
+    if failed.len() > 0 {
+        println!("lambda function handler return batch faliures: {:?}", failed);
     }
 
     Ok(value)
