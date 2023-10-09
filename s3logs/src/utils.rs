@@ -1355,7 +1355,11 @@ impl S3LogTransform {
         info!("start transform {:?} from orig bucket {} at timestamp {} to parquet at thread {:?}",
             files.iter().map(|f| f.get_fullpath()).collect::<Vec<String>>(), orig_bucket, ts, std::thread::current().id());
         let copy_files: Vec<StaggingFile> = files.iter().map(|f| f.self_copy()).collect();
-        let res = self.write_to_parquet((orig_bucket.clone(), ts), copy_files);
+        let me = Self::self_copy(self);
+        let orig_bucket_clone = orig_bucket.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            me.write_to_parquet((orig_bucket_clone, ts), copy_files)
+        }).await?;
         match res {
             Ok((flocks, parquet_filepath, total_lines)) => {
                 let tm = TransferManager::new(&self.region).await;
