@@ -15,7 +15,9 @@ use log::{info, warn, debug};
 use s3logs::utils::S3LogAggregator;
 
 const DEFAULT_LOG_LEVEL: &str = concat!(env!("CARGO_PKG_NAME"), "=info,s3logs=info");
-const DEFAULT_CONFIG_FILE: &str = concat!(env!("CARGO_PKG_NAME"), ".log");
+const DEFAULT_LOG_FILE: &str = concat!(env!("CARGO_PKG_NAME"), ".log");
+const DEFAULT_LOG_ROTATE_SIZE: u64 = 50; // in MB
+const DEFAULT_LOG_KEEP_FILES: u64 = 100;
 const DEFAULT_NUM_WORKERS: u64 = 2;
 const DEFAULT_MAX_SQS_MESSAGES: i32 = 10;
 const DEFAULT_WAIT_TIME_SECONDS: i32 = 20;
@@ -300,9 +302,19 @@ fn main() {
                         .into_string()
                         .unwrap();
     let logfile = table.get("logfile")
-                        .unwrap_or(&config::Value::from(DEFAULT_CONFIG_FILE))
+                        .unwrap_or(&config::Value::from(DEFAULT_LOG_FILE))
                         .to_owned()
                         .into_string()
+                        .unwrap();
+    let log_rotate_size = table.get("log_rotate_size")
+                        .unwrap_or(&config::Value::from(DEFAULT_LOG_ROTATE_SIZE))
+                        .to_owned()
+                        .into_uint()
+                        .unwrap();
+    let log_keep_files = table.get("log_keep_files")
+                        .unwrap_or(&config::Value::from(DEFAULT_LOG_KEEP_FILES))
+                        .to_owned()
+                        .into_uint()
                         .unwrap();
     let workers = table.get("num_workers")
                         .unwrap_or(&config::Value::from(DEFAULT_NUM_WORKERS))
@@ -335,34 +347,68 @@ fn main() {
     }
 
     let loglevel = std::env::var("RUST_LOG").unwrap_or(config_loglevel.to_string());
-    let mut builder = env_logger::Builder::new();
-    builder.parse_filters(&loglevel);
 
     let quit = Arc::new(AtomicBool::new(false));
 
-    if daemon {
-        let file = std::fs::OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .append(true)
-                            .open(&logfile)
-                            .expect("unable to open log file");
-
+    let logger_handler = if daemon {
         let daemonize = Daemonize::new()
                     .pid_file("s3logd.pid")
-                    .stdout(file.try_clone().unwrap())
-                    .stderr(file.try_clone().unwrap())
-                    .exit_action(|| println!("starting s3logd"));
+                    .working_directory("./");
 
         if let Err(e) = daemonize.start() {
             eprintln!("error occur when starting: {}", e);
             process::exit(1);
         }
-        builder.target(env_logger::Target::Pipe(Box::new(file)));
-    }
 
-    builder.init();
-    info!("started as daemon");
+        // log output style
+        fn env_format(
+            w: &mut dyn std::io::Write,
+            now: &mut flexi_logger::DeferredNow,
+            record: &log::Record,
+        ) -> Result<(), std::io::Error> {
+            write!(
+                w,
+                "[{} {} {}] {}",
+                now.format_rfc3339(),
+                record.level(),
+                record.module_path().unwrap_or("<unnamed>"),
+                &record.args()
+            )
+        }
+
+        let flexi_logger = flexi_logger::Logger::try_with_str(&loglevel).unwrap();
+
+        let logfilespec = flexi_logger::FileSpec::default()
+            .directory("./")
+            .basename(env!("CARGO_PKG_NAME"))
+            .suffix("log");
+        let lh = flexi_logger.log_to_file(logfilespec)
+            .create_symlink(&logfile)
+            .write_mode(flexi_logger::WriteMode::BufferAndFlush)
+            .format(env_format)
+            .rotate(
+                flexi_logger::Criterion::Size(log_rotate_size*1024*1024),
+                flexi_logger::Naming::Numbers,
+                flexi_logger::Cleanup::KeepCompressedFiles(log_keep_files.try_into().unwrap())
+            )
+            .start()
+            .unwrap();
+        Some(lh)
+    } else {
+        let mut builder = env_logger::Builder::new();
+        builder.parse_filters(&loglevel);
+        builder.init();
+        None
+    };
+
+    if daemon {
+        info!("started as daemon");
+        info!("logfile: {}", logfile);
+        info!("log_rotate_size: {} MB", log_rotate_size);
+        info!("log_keep_files: {}", log_keep_files);
+    } else {
+        info!("started as foreground");
+    }
     info!("loglevel: {}", loglevel);
     info!("queue: {}", queue);
     info!("num_workers: {}", workers);
@@ -387,5 +433,8 @@ fn main() {
                 recv_idle_sec, recv_queue_len, workers).await;
             exec.entry(quit.clone()).await;
         });
-        info!("all tasks have quit, exit program...");
+    info!("all tasks have quit, exit program...");
+    if let Some(handler) = logger_handler {
+        handler.flush();
+    }
 }
