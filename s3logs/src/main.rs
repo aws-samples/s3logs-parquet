@@ -90,12 +90,12 @@ async fn cli_main(opt: SubCmd) -> Result<(), Error> {
                 }
             }
         },
-        SubCmd::Transform {region, bucket, input, threads: _} => {
+        SubCmd::Transform {region, bucket, input, threads} => {
 
             let trans = S3LogTransform::new(&region, &bucket, None, None, None);
 
             if input.is_none() {
-                let total_lines = trans.process_stagging_dir().await?;
+                let total_lines = trans.process_stagging_dir(threads).await?;
                 println!("transform task ended, {} lines processed", total_lines);
                 return Ok(());
             }

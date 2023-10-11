@@ -1402,7 +1402,7 @@ impl S3LogTransform {
         Ok(0)
     }
 
-    pub async fn process_stagging_dir(&self) -> Result<usize, Error> {
+    pub async fn process_stagging_dir(&self, threads: Option<usize>) -> Result<usize, Error> {
 
         let files = self.scan_stagging().await?;
 
@@ -1419,6 +1419,12 @@ impl S3LogTransform {
                 me.transform_parquet((orig_bucket, ts), files).await
             });
             joins.push(join);
+            if threads.is_some() {
+                if joins.len() == threads.unwrap() {
+                    info!("spawned {} threads", threads.unwrap());
+                    break;
+                }
+            }
         }
 
         let mut total_lines = 0;

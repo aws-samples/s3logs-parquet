@@ -20,7 +20,7 @@ async fn function_handler(event: LambdaEvent<EventBridgeEvent>) -> Result<(), Er
     println!("start log transform task for region: {} to bucket: {}", region, bucket);
     let now = Instant::now();
     let trans = S3LogTransform::new(&region, &bucket, None, None, None);
-    match trans.process_stagging_dir().await {
+    match trans.process_stagging_dir(None).await {
         Ok(total_lines) => {
             println!("transform task ended, {} lines processed cost: {:?}", total_lines, now.elapsed());
         },
