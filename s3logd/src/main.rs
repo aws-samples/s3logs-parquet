@@ -18,6 +18,7 @@ const DEFAULT_LOG_LEVEL: &str = concat!(env!("CARGO_PKG_NAME"), "=info,s3logs=in
 const DEFAULT_LOG_FILE: &str = concat!(env!("CARGO_PKG_NAME"), ".log");
 const DEFAULT_LOG_ROTATE_SIZE: u64 = 50; // in MB
 const DEFAULT_LOG_KEEP_FILES: u64 = 100;
+const DEFAULT_LOG_DIRECTORY: &str = "logs";
 const DEFAULT_NUM_WORKERS: u64 = 2;
 const DEFAULT_MAX_SQS_MESSAGES: i32 = 10;
 const DEFAULT_WAIT_TIME_SECONDS: i32 = 20;
@@ -316,6 +317,11 @@ fn main() {
                         .to_owned()
                         .into_uint()
                         .unwrap();
+    let log_directory = table.get("log_directory")
+                        .unwrap_or(&config::Value::from(DEFAULT_LOG_DIRECTORY))
+                        .to_owned()
+                        .into_string()
+                        .unwrap();
     let workers = table.get("num_workers")
                         .unwrap_or(&config::Value::from(DEFAULT_NUM_WORKERS))
                         .to_owned()
@@ -379,7 +385,7 @@ fn main() {
         let flexi_logger = flexi_logger::Logger::try_with_str(&loglevel).unwrap();
 
         let logfilespec = flexi_logger::FileSpec::default()
-            .directory("./")
+            .directory(log_directory)
             .basename(env!("CARGO_PKG_NAME"))
             .suffix("log");
         let lh = flexi_logger.log_to_file(logfilespec)
