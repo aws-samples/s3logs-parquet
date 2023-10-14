@@ -1141,7 +1141,8 @@ impl S3LogTransform {
         let lines = std::io::BufReader::with_capacity(self.file_buf_size, concat).lines();
 
         let parquet_filepath = self.gen_parquet_filepath(StaggingFile::new_from_ts(&orig_bucket, self.tz, ts));
-        let ofile = std::fs::File::create(&parquet_filepath).unwrap();
+        let incomplete_parquet_filepath = format!("{}.incomplete", parquet_filepath);
+        let ofile = std::fs::File::create(&incomplete_parquet_filepath).unwrap();
 
         let writer = ArrowWriter::try_new(&ofile, Arc::new(self.schema.clone()), Some(self.writer_props.clone())).unwrap();
 
@@ -1165,7 +1166,7 @@ impl S3LogTransform {
 
             debug!("schema extended to {} fields", new_schema.fields().len());
             debug!("recreate output parquet file");
-            let ofile = std::fs::File::create(&parquet_filepath)?;
+            let ofile = std::fs::File::create(&incomplete_parquet_filepath)?;
 
             let writer = ArrowWriter::try_new(&ofile, Arc::new(new_schema.clone()), Some(self.writer_props.clone())).unwrap();
 
@@ -1176,6 +1177,11 @@ impl S3LogTransform {
             assert!(actual_max_fields == _max);
         }
 
+        std::fs::rename(&incomplete_parquet_filepath, &parquet_filepath)
+            .map_err(|e| {
+                warn!("failed to rename {} to {}", incomplete_parquet_filepath, parquet_filepath);
+                e
+            })?;
         info!("output parquet file at {}, cost: {}", parquet_filepath, stat.elapsed());
         Ok((ofiles, parquet_filepath, total_lines))
     }
