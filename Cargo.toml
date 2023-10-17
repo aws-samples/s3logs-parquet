@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 members = [
     "s3logs",
     "s3logd",
