@@ -197,7 +197,7 @@ class S3LogReactor:
         if round(fps) > self.target_fps:
             self.proc_count.value = self.proc_count.value - 1
         elif round(fps) < self.target_fps:
-            if self.proc_count == self.os_cpus:
+            if self.proc_count.value == self.os_cpus:
                 print("MAX proc count {} reached".format(self.proc_count.value))
             else:
                 proc_id = self.proc_count.value
