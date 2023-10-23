@@ -9,7 +9,7 @@ use std::task::Poll;
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
 use std::collections::{HashMap, HashSet};
-use log::{info, debug, warn};
+use log::{info, debug, warn, error};
 use tokio::fs:: OpenOptions;
 use tokio::io::{BufReader, AsyncBufReadExt};
 use tokio::io:: AsyncWriteExt;
@@ -1023,6 +1023,9 @@ impl S3LogTransform {
                         let datetime = DateTime::parse_from_str(&line[2], S3_LOG_DATATIME_FMT)
                                             .ok().and_then(|dt| Some(dt.timestamp() as TimeStamp));
 
+                        if datetime.is_none() {
+                            error!("failed to parse Time field of log line, dump full line: {:?}", &line);
+                        }
                         if self.is_cross_bound(last_datetime, datetime.unwrap()) {
                             index = HashSet::new();
                         }
