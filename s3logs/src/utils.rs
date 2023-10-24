@@ -39,7 +39,7 @@ type TimeStamp = usize;
 type OrigBucket = String;
 
 // what S3 default
-const S3_LOG_REGEX_FULL: &str = r#"\[(.+)\]|"([^"]+)"|([^\s""\[\]]+)"#;
+const S3_LOG_REGEX_FULL: &str = r#"\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}\ \+\d{4})\]|"([^"]+)"|([^\s""\[\]]+)"#;
 const S3_LOG_REGEX_TIMESTAMP: &str = r#"(\S+) (\S+) \[([^\]]+)\]"#;
 const S3_LOG_REGEX_ORIG_BUCKET: &str = r#"(\S+) (\S+)"#;
 const S3_LOG_DATATIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
