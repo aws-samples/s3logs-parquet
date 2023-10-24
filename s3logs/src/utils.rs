@@ -249,8 +249,9 @@ impl LineParser {
                 let dt = DateTime::parse_from_str(
                     std::str::from_utf8(field.unwrap().unwrap().as_bytes()).unwrap(), S3_LOG_DATATIME_FMT).unwrap();
                 v.push(dt.timestamp().to_string());
+            } else {
+                v.push(String::from_utf8(field.unwrap().unwrap().as_bytes().to_vec()).unwrap());
             }
-            v.push(String::from_utf8(field.unwrap().unwrap().as_bytes().to_vec()).unwrap())
         }
         v
     }
