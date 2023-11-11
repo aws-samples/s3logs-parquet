@@ -1,7 +1,9 @@
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
 use futures::future::join_all;
+use tokio::sync::RwLock;
 use tokio::io::{Error, ErrorKind};
 use tokio::time::{sleep, Duration};
 use aws_config::meta::region::RegionProviderChain;
@@ -24,7 +26,32 @@ const DEFAULT_MAX_SQS_MESSAGES: i32 = 10;
 const DEFAULT_WAIT_TIME_SECONDS: i32 = 20;
 const DEFAULT_RECV_IDLE_SECONDS: u64 = 15;
 
-type TaskQueue = deadqueue::unlimited::Queue<Message>;
+struct TaskQueue {
+    inner: RwLock<VecDeque<Message>>,
+}
+
+impl TaskQueue {
+    fn new() -> Self {
+        Self {
+            inner: RwLock::new(VecDeque::new()),
+        }
+    }
+
+    async fn push(&self, msg: Message) {
+        let mut v = self.inner.write().await;
+        v.push_back(msg);
+    }
+
+    async fn pop(&self) -> Option<Message> {
+        let mut v = self.inner.write().await;
+        v.pop_front()
+    }
+
+    async fn len(&self) -> usize {
+        let v = self.inner.read().await;
+        v.len()
+    }
+}
 
 struct Executor {
     client: Client,
@@ -126,18 +153,18 @@ impl Executor {
                     let qmsg = Message::builder()
                                 .message_id("LET_ME_QUIT")
                                 .build();
-                    self.queue.push(qmsg);
+                    self.queue.push(qmsg).await;
                 }
                 debug!("retrieve message loop quit ...");
                 break;
             }
 
             for msg in msgs {
-                self.queue.push(msg);
+                self.queue.push(msg).await;
             }
 
             loop {
-                let qlen = self.queue.len();
+                let qlen = self.queue.len().await;
                 if qlen >= (self.recv_queue_len - self.recv_max_msgs) as usize {
                     // queue almost full, sleep for a while
                     info!("recv queue {}/{} sleep {} seconds", qlen, self.recv_queue_len, self.recv_idle_sec);
@@ -161,13 +188,17 @@ impl Executor {
             let wrk = tokio::task::spawn(async move {
                 info!("worker #{} started", worker);
                 loop {
-                    let msg = me.queue.pop().await;
                     if _quit.load(Ordering::SeqCst) {
                         debug!("quit signal received in worker {:?}", std::thread::current().id());
                         break;
                     }
+                    let msg = me.queue.pop().await;
+                    if msg.is_none() {
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
                     // ignore any error and continue
-                    let _ = me.handle_one_msg(msg).await;
+                    let _ = me.handle_one_msg(msg.unwrap()).await;
                 }
             });
             tasks.push(wrk);

@@ -21,5 +21,4 @@ ctrlc = { version = "3.2.3", features = ["termination"] }
 env_logger = "0.9.1"
 log = "0.4.17"
 flexi_logger = { version = "0.27.2", features = ["async", "compress"] }
-deadqueue = "0.2.4"
 s3logs = { version = "0.4.0", path = "../s3logs" }
