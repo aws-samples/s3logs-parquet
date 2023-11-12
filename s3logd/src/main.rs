@@ -13,7 +13,7 @@ use aws_lambda_events::s3::{S3Event, S3EventRecord};
 use config::Config;
 use structopt::StructOpt;
 use daemonize::Daemonize;
-use log::{info, warn, debug};
+use log::{info, warn, trace};
 use s3logs::utils::S3LogAggregator;
 
 const DEFAULT_LOG_LEVEL: &str = concat!(env!("CARGO_PKG_NAME"), "=info,s3logs=info");
@@ -144,7 +144,7 @@ impl Executor {
                 continue;
             }
             let msgs = res.unwrap();
-            debug!("polling get msgs: {}", msgs.len());
+            trace!("polling get msgs: {}", msgs.len());
 
             if quit.load(Ordering::SeqCst) {
                 info!("catch quit signal, wakeup all worker to quit ...");
@@ -155,7 +155,7 @@ impl Executor {
                                 .build();
                     self.queue.push(qmsg).await;
                 }
-                debug!("retrieve message loop quit ...");
+                info!("retrieve message loop quit ...");
                 break;
             }
 
@@ -167,7 +167,7 @@ impl Executor {
                 let qlen = self.queue.len().await;
                 if qlen >= (self.recv_queue_len - self.recv_max_msgs) as usize {
                     // queue almost full, sleep for a while
-                    info!("recv queue {}/{} sleep {} seconds", qlen, self.recv_queue_len, self.recv_idle_sec);
+                    trace!("recv queue {}/{} sleep {} seconds", qlen, self.recv_queue_len, self.recv_idle_sec);
                     sleep(Duration::from_secs(self.recv_idle_sec)).await;
                 } else {
                     // poll new messages to fill up queue
@@ -189,7 +189,7 @@ impl Executor {
                 info!("worker #{} started", worker);
                 loop {
                     if _quit.load(Ordering::SeqCst) {
-                        debug!("quit signal received in worker {:?}", std::thread::current().id());
+                        info!("quit signal received in worker {:?}", std::thread::current().id());
                         break;
                     }
                     let msg = me.queue.pop().await;
@@ -241,12 +241,12 @@ impl Executor {
         if event_name != "ObjectCreated:CompleteMultipartUpload"
             && event_name != "ObjectCreated:Put" {
 
-            info!("skip non PUT event: {} for region: {}, bucket: {}, key: {}, size: {}",
+            warn!("skip non PUT event: {} for region: {}, bucket: {}, key: {}, size: {}",
                     event_name, region, bucket, key, size);
             return Ok(())
         }
 
-        info!("start log aggregation task for region: {}, bucket: {}, key: {}, size: {}",
+        trace!("start log aggregation task for region: {}, bucket: {}, key: {}, size: {}",
                     region, bucket, key, size);
         let agg = S3LogAggregator::new(&region, &bucket, &key, None, None, None, None);
         let res = agg.process_s3().await;
@@ -270,7 +270,7 @@ impl Executor {
             } else {
                 if let Ok(_) = Self::s3_event_handler(s3event.records[0].clone()).await {
                     let _ = self.del_msg(&receipt).await;
-                    debug!("sqs receipt {} finished", receipt);
+                    trace!("sqs receipt {} finished", receipt);
                 }
             }
         }
