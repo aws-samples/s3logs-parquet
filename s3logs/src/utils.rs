@@ -118,6 +118,40 @@ impl<'a> Future for FileLock<'a> {
     }
 }
 
+#[inline]
+async fn backoff_lock_try(file: &tokio::fs::File, filename: &str, max_spin: u64, backoff_step_ms: u64, timeout: Duration) -> Result<(), Error> {
+
+    let mut spin_count = 1;
+    let mut sleep_count = 0;
+    let start = Instant::now();
+
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(_) => {
+                debug!("spin stat - spin count: {}, sleep count: {}, total cost: {:#?}", spin_count, sleep_count, start.elapsed());
+                return Ok(());
+            },
+            Err(e) => {
+                if e.kind() != ErrorKind::WouldBlock {
+                    warn!("unhandled error occur when try lock exlusive: {}", e);
+                    panic!("unhandled error occur when try lock exlusive: {}", e);
+                };
+            },
+        };
+
+        spin_count += 1;
+        if spin_count % max_spin == 0 {
+            if start.elapsed() >= timeout {
+                warn!("try_lock_exclusive timeout - file: {}, spin count: {}, sleep count: {}, total cost: {:#?}",
+                    filename, spin_count, sleep_count, start.elapsed());
+                return Err(Error::new(ErrorKind::TimedOut, "timeout"));
+            }
+            sleep_count += 1;
+            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_count*backoff_step_ms)).await;
+        }
+    }
+}
+
 fn lock_exclusive_try(file: &std::fs::File, timeout: Duration, retry_wait: Duration) -> Result<(), Error> {
 
     let mut total = Duration::new(0, 0);
@@ -684,8 +718,12 @@ impl S3LogAggregator {
 
         let mut stat = TimeStats::new();
         info!("trying excl lock for file {}", path.as_os_str().to_str().unwrap());
-        let flock = FileLock::new(&file, self.flock_timeout);
-        flock.await?;
+        if true {
+            backoff_lock_try(&file, path.as_os_str().to_str().unwrap(), 10, 25, self.flock_timeout).await?;
+        } else {
+            let flock = FileLock::new(&file, self.flock_timeout);
+            flock.await?;
+        }
         info!("file {} locked", path.as_os_str().to_str().unwrap());
 
         file.write_all((logs.join("\n") + "\n").as_bytes()).await?;
@@ -912,14 +950,14 @@ impl S3LogTransform {
             }
 
             let file = res.unwrap();
-            let timeout = Duration::new(0, 0);
             // quick check with a single try lock
-            let flock = FileLock::new(&file, timeout);
-            let res = flock.await;
-            if res.is_err() {
-                // someone is working on
-                info!("someone is working on, ignore {}", processing);
-                continue;
+            match file.try_lock_exclusive() {
+                Ok(_) => {},
+                Err(_) => {
+                    // someone is working on
+                    info!("someone is working on, ignore {}", processing);
+                    continue;
+                }
             }
 
             let res = self.file_merge(&p).await;
@@ -1273,8 +1311,12 @@ impl S3LogTransform {
                             .create(true)
                             .append(true)
                             .open(&stagging).await?;
-        let flock = FileLock::new(&file, self.flock_timeout);
-        flock.await?;
+        if true {
+            backoff_lock_try(&file, &stagging, 10, 25, self.flock_timeout).await?;
+        } else {
+            let flock = FileLock::new(&file, self.flock_timeout);
+            flock.await?;
+        }
         debug!("locked file {}", &stagging);
 
         let rd = tokio::fs::File::open(&processing).await?;
