@@ -462,6 +462,7 @@ fn main() {
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .max_blocking_threads(workers as usize * 2)
         .build()
         .unwrap()
         .block_on(async {
