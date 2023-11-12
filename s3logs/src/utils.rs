@@ -618,7 +618,8 @@ impl S3LogAggregator {
     /*
      * @return - number of lines processed
      */
-    pub async fn dispatch(&self, parts: Vec<Vec<(TimeStamp, S3LogLine)>>) -> Result<usize, Error> {
+    #[allow(dead_code)]
+    pub async fn _dispatch(&self, parts: Vec<Vec<(TimeStamp, S3LogLine)>>) -> Result<usize, Error> {
 
         let files = parts.len();
 
@@ -634,6 +635,20 @@ impl S3LogAggregator {
         let mut total = 0;
         for join in joins {
             let count = join.await??;
+            total += count;
+        }
+
+        info!("total {} of lines appending to {} stagging log file", total, files);
+        Ok(total)
+    }
+
+    pub async fn dispatch(&self, parts: Vec<Vec<(TimeStamp, S3LogLine)>>) -> Result<usize, Error> {
+
+        let files = parts.len();
+
+        let mut total = 0;
+        for part in parts {
+            let count = self.task_append_stagging(part).await?;
             total += count;
         }
 
