@@ -199,11 +199,15 @@ impl Receipt {
 struct ReceiptGen {
     default: Receipt,
     counter: usize,
+    total_partition: usize,
     client: Arc<Client>,
 }
 
 impl ReceiptGen {
-    fn new(sqs_url: &str, client: Arc<Client>, region: &str, bucket: &str, key: &str, sqs_receipt: &str) -> Self {
+    fn new(sqs_url: &str, client: Arc<Client>, region: &str, bucket: &str, key: &str, total_partition: usize, sqs_receipt: &str) -> Self {
+
+        assert!(total_partition > 0);
+
         Self {
             default: Receipt {
                 type_: ReceiptType::Sqs,
@@ -218,17 +222,16 @@ impl ReceiptGen {
                 client: None,
             },
             counter: 0,
+            total_partition: total_partition,
             client: client.clone(),
         }
     }
 
-    async fn next(&mut self, total: usize) -> Receipt {
-
-        assert!(total > 0);
+    async fn next(&mut self) -> Receipt {
 
         let mut receipt = self.default.clone();
 
-        if total == 1 {
+        if self.total_partition == 1 {
             // ReceiptType::Sqs
             receipt.set_client(self.client.clone());
             return receipt;
@@ -244,7 +247,6 @@ impl ReceiptGen {
         self.counter += 1;
         return receipt;
     }
-
 }
 
 #[derive(PartialEq)]
@@ -571,15 +573,15 @@ impl Manager {
         let mut cursor = std::io::Cursor::new(buf);
         let v = self.lines_to_v_s(BufRead::lines(cursor)).unwrap();
         */
-        let mut receipt_gen = ReceiptGen::new(sqs_url, client, region, bucket, key, sqs_receipt);
+        let total_partition = map.len();
+        let mut receipt_gen = ReceiptGen::new(sqs_url, client, region, bucket, key, total_partition, sqs_receipt);
 
-        let total = map.len();
         let mut line_start = 0;
         let mut line_count = 0;
 
         for (partition, logs) in map.into_iter() {
 
-            let mut receipt = receipt_gen.next(total).await;
+            let mut receipt = receipt_gen.next().await;
             line_count = logs.len();
             receipt.finalize(line_start, line_count).await;
 
