@@ -26,6 +26,7 @@ fn match_storage_class(x: &str) -> StorageClass {
     }
 }
 
+#[derive(Clone)]
 pub struct TransferManager {
     client: Client,
     storage_class: StorageClass,

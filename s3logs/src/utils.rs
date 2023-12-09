@@ -209,7 +209,7 @@ pub struct LineParser {
 
 impl LineParser {
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             re_timestamp: RegexBuilder::new()
                 .jit(true)
