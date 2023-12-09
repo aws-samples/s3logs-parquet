@@ -752,7 +752,7 @@ impl Manager {
         let mut tasks = self.tasks.lock().await;
         while let Some(task) = tasks.pop() {
             if !task.is_finished() {
-                panic!("task is not yet finished");
+                task.await;
             }
         }
     }
