@@ -32,6 +32,8 @@ const hourly_partition: bool = false;
 const timezone: &str = "UTC+8";
 const output_threshold_lines: usize = 10000000;
 const output_threshold_maxidle: u64 = 60;
+const config_channel_cap: usize = 100;
+const config_channel_full_busywait: u64 = 100;
 
 pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
@@ -265,7 +267,7 @@ struct Channel {
 
 impl Channel {
     pub fn new() -> Self {
-        let (tx, rx) = crossbeam::channel::unbounded();
+        let (tx, rx) = crossbeam::channel::bounded(config_channel_cap);
         Self {
             //state: Arc::new(Mutex::new(ChannelGateState::Initialized)),
             tx_count: Arc::new(AtomicUsize::new(0)),
@@ -315,11 +317,32 @@ impl Channel {
     }
 
     pub async fn do_send(&self, logs: Vec<LogFields>, receipt: Receipt) {
+
+        let mut logs_next = logs;
+        loop {
+            match self.get_sender().try_send(logs_next) {
+                Err(crossbeam::channel::TrySendError::Full(logs)) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(config_channel_full_busywait)).await;
+                    logs_next = logs;
+                    continue;
+                },
+                Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                    panic!("found channel disconnected while trying to send new logs to output");
+                },
+                Ok(_) => {
+                    break;
+                },
+            }
+        };
+
+        /*
+           unbounded code
         let res = self.get_sender().try_send(logs);
         if res.is_err() {
             warn!("err while send logs to output: {:?}", res.unwrap());
             todo!();
         }
+        */
 
         let mut receipts = self.receipts.lock().await;
         receipts.push(receipt);
