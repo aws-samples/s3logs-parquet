@@ -470,12 +470,27 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let mgr = output::Manager::new(quit.clone());
 
-            let exec = Executor::new(&region, &queue,
-                recv_max_msgs, recv_pollwait_sec,
-                recv_idle_sec, recv_queue_len, workers, mgr).await;
-            exec.entry(quit.clone()).await;
+            let mut set = tokio::task::JoinSet::new();
+
+            for i in 0..4 {
+                let quit = quit.clone();
+                let region = region.to_string();
+                let queue = queue.to_string();
+
+                set.spawn(async move {
+                    let mgr = output::Manager::new(quit.clone());
+
+                    let exec = Executor::new(&region, &queue,
+                        recv_max_msgs, recv_pollwait_sec,
+                        recv_idle_sec, recv_queue_len, workers, mgr).await;
+                    exec.entry(quit.clone()).await;
+                });
+            }
+
+            while let Some(res) = set.join_next().await {
+                let _ = res.unwrap();
+            }
         });
     info!("all tasks have quit, exit program...");
     if let Some(handler) = logger_handler {
