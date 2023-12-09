@@ -18,13 +18,16 @@ use chrono::prelude::*;
 use crossbeam::channel::{Sender, Receiver};
 use serde::{Deserialize, Serialize};
 use rand::distributions::{Alphanumeric, DistString};
+use pcre2::bytes::{RegexBuilder, Regex};
 use aws_sdk_sqs::{Client, Region};
 use s3logs::utils::LineParser;
 use s3logs::stats::TimeStats;
 use s3logs::transfer::TransferManager;
 use crate::conf::ParquetWriterConfigReader;
 
-const S3_LOG_DATATIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
+const S3_LOG_DATETIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
+const DATE_TIME_FMT: &str = "%Y-%m-%d";
+const S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY: &str = r#"(\d{4}-\d{2}-\d{2})-00-00-00-[A-Z0-9]{16}$"#;
 
 const file_receipt_dir: &str = "/backup/stream";
 const output_temp_dir:&str = "/backup/stream";
@@ -79,14 +82,14 @@ impl TimePartition {
     }
 
     fn parser_custom(&self, reqtime: &str) -> PartitionedTimeStamp {
-        let dt = DateTime::parse_from_str(reqtime, S3_LOG_DATATIME_FMT).unwrap().with_timezone(&self.tz);
+        let dt = DateTime::parse_from_str(reqtime, S3_LOG_DATETIME_FMT).unwrap().with_timezone(&self.tz);
         let local: NaiveDateTime = dt.naive_local();
         let ts = local.timestamp();
         self.timestamp_align_left(ts as TimeStamp)
     }
 
     fn parser_utc0(&self, reqtime: &str) -> PartitionedTimeStamp {
-        let ts = DateTime::parse_from_str(reqtime, S3_LOG_DATATIME_FMT).unwrap().timestamp();
+        let ts = DateTime::parse_from_str(reqtime, S3_LOG_DATETIME_FMT).unwrap().timestamp();
         self.timestamp_align_left(ts as TimeStamp)
     }
 
@@ -442,6 +445,7 @@ pub struct Manager {
     quit: Arc<AtomicBool>,
     permit: Arc<tokio::sync::Semaphore>,
     tm: TransferManager,
+    re_event_time_key: Option<Regex>,
 }
 
 impl Manager {
@@ -454,6 +458,9 @@ impl Manager {
         let region = "ap-northeast-1";
         let prefix = "s3logs";
         let sqs_url = "https://sqs.ap-northeast-1.amazonaws.com/911329921905/s3logsq1";
+        let event_time_key_format = true;
+        let utc0_mode = true;
+        const hourly_partition: bool = false;
 
         let message_type = std::fs::read_to_string(&schema_filepath).expect("unable to read parquet schema config");
         let pq_schema = parquet::schema::parser::parse_message_type(&message_type).expect("Expected valid schema");
@@ -475,6 +482,17 @@ impl Manager {
             })
         });
 
+        let re_event_time_key = if event_time_key_format && utc0_mode {
+            assert!(hourly_partition == false);
+            let re = RegexBuilder::new()
+                .jit(true)
+                .build(S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY)
+                .unwrap();
+            Some(re)
+        } else {
+            None
+        };
+
         Self {
             bucket: bucket.to_string(),
             region: region.to_string(),
@@ -487,7 +505,28 @@ impl Manager {
             quit: quit,
             permit: Arc::new(tokio::sync::Semaphore::new(1)),
             tm: tm,
+            re_event_time_key: re_event_time_key,
         }
+    }
+
+    // read in lines into partitioned fields special for utc0
+    pub async fn lines_to_partition_passthrough<R>(&self, part_ts: PartitionedTimeStamp, mut lines: tokio::io::Lines<R>)
+        -> Result<BTreeMap<PartitionedTimeStamp, Vec<LogFields>>>
+    where
+        R: tokio::io::AsyncBufRead + Unpin
+    {
+        let mut map: BTreeMap<PartitionedTimeStamp, Vec<LogFields>> = BTreeMap::new();
+        let mut stat = TimeStats::new();
+        let mut v = Vec::new();
+
+        while let Some(line) = lines.next_line().await? {
+            let fields = self.line_parser.extract_full(&line, false);
+            v.push(fields);
+        }
+        map.insert(part_ts, v);
+
+        debug!("lines to v cost: {}", stat.elapsed());
+        Ok(map)
     }
 
     // read in lines into partitioned fields
@@ -564,7 +603,19 @@ impl Manager {
 
         let lines = BufReader::with_capacity(10*1024*1024, stream.into_async_read()).lines();
         debug!("object s3://{}/{} initialized download cost: {}", bucket, key, stat.elapsed());
-        let mut map = self.lines_to_partition(lines).await?;
+        let mut map = if let Some(re) = &self.re_event_time_key {
+            let caps = re.captures(key.as_bytes()).unwrap();
+            if let Some(date) = caps.and_then(|cap| cap.get(1)) {
+                let date_str = std::str::from_utf8(date.as_bytes()).unwrap();
+                let part_ts = DateTime::parse_from_str(date_str, DATE_TIME_FMT).unwrap().timestamp();
+                self.lines_to_partition_passthrough(part_ts as PartitionedTimeStamp, lines).await?
+            } else {
+                error!("log object key {} is not in event time format, this is passthrough mode, please correct it", key);
+                panic!("log object key {} is not in event time format, this is passthrough mode, please correct it", key);
+            }
+        } else {
+            self.lines_to_partition(lines).await?
+        };
         /*
         let mut reader = BufReader::with_capacity(10*1024*1024, stream.into_async_read());
         let mut buf = Vec::new();

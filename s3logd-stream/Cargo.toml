@@ -25,6 +25,7 @@ chrono = "0.4.31"
 tzif = "0.2.2"
 rand = "0.8.5"
 crossbeam = "0.8.2"
+pcre2 = "0.2.6"
 arrow = "49.0.0"
 arrow-schema = "49.0.0"
 parquet = { version = "49.0.0", features = ["async"] }
