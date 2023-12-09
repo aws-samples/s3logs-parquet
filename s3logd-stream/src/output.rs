@@ -631,7 +631,6 @@ impl Manager {
 
             let mut final_run = false;
             let mut next_rx = rx;
-            let mut this_channel: Option<Channel> = None;
             let mut exit = false;
             let mut receipts: Vec<Receipt> = Vec::new();
 
@@ -684,13 +683,11 @@ impl Manager {
                             // give this channel last chance to retrieve all data and quit again
                             final_run = true;
                             next_rx = channel.get_rx().clone();
-                            this_channel = Some(channel);
                             debug!("[{}] output loop return reason MaxTimeReachedEmpty => need a final run", partition);
                             exit = false;
                             receipts = r;
                         } else {
                             debug!("[{}] output loop return reason MaxTimeReachedEmpty => channel is clean, let's quit", partition);
-                            this_channel = Some(channel);
                             exit = true;
                             receipts = r;
                         }
@@ -729,13 +726,6 @@ impl Manager {
                 } else {
                     panic!("failed to upload final output to s3");
                 }
-
-                tokio::fs::rename(&uploading_parquet_filepath, &parquet_filepath)
-                    .await
-                    .map_err(|e| {
-                        error!("failed to rename {} to {}", uploading_parquet_filepath, parquet_filepath);
-                        panic!("unable to rename file");
-                    });
 
                 // 3. callback all receipts
                 while let Some(receipt) = receipts.pop() {
