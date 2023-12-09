@@ -702,34 +702,44 @@ impl Manager {
                 }
 
                 debug!("[{}] before channel close", partition);
-                let uploading_filename = format!("{}.uploading", final_filename);
-                let uploading_parquet_filepath = format!("{}/{}", output_temp_dir, uploading_filename);
+                if receipts.len() > 0 {
 
-                // 1. rename output file to uploading name
-                tokio::fs::rename(&incomplete_parquet_filepath, &uploading_parquet_filepath)
-                    .await
-                    .map_err(|e| {
-                        error!("failed to rename {} to {}", incomplete_parquet_filepath, uploading_parquet_filepath);
-                        panic!("unable to rename file");
-                    });
+                    let uploading_filename = format!("{}.uploading", final_filename);
+                    let uploading_parquet_filepath = format!("{}/{}", output_temp_dir, uploading_filename);
 
-                // 2. upload to S3
-                let key = format!("stream/{}", final_filename);
-                let res = tm.upload_object(&uploading_parquet_filepath, "ahaparquet", &key, 0).await;
-                if res.is_ok() {
-                    tokio::fs::remove_file(&uploading_parquet_filepath)
+                    // 1. rename output file to uploading name
+                    tokio::fs::rename(&incomplete_parquet_filepath, &uploading_parquet_filepath)
                         .await
                         .map_err(|e| {
-                            error!("failed to remove {}", parquet_filepath);
-                            panic!("unable to remove file");
+                            error!("failed to rename {} to {}", incomplete_parquet_filepath, uploading_parquet_filepath);
+                            panic!("unable to rename file");
                         });
-                } else {
-                    panic!("failed to upload final output to s3");
-                }
 
-                // 3. callback all receipts
-                while let Some(receipt) = receipts.pop() {
-                    receipt.close().await;
+                    // 2. upload to S3
+                    let key = format!("stream/{}", final_filename);
+                    let res = tm.upload_object(&uploading_parquet_filepath, "ahaparquet", &key, 0).await;
+                    if res.is_ok() {
+                        tokio::fs::remove_file(&uploading_parquet_filepath)
+                            .await
+                            .map_err(|e| {
+                                error!("failed to remove {}", parquet_filepath);
+                                panic!("unable to remove file");
+                            });
+                    } else {
+                        panic!("failed to upload final output to s3");
+                    }
+
+                    // 3. callback all receipts
+                    while let Some(receipt) = receipts.pop() {
+                        receipt.close().await;
+                    }
+                } else {
+                    tokio::fs::remove_file(&incomplete_parquet_filepath)
+                        .await
+                        .map_err(|e| {
+                            error!("failed to remove zero content file {}", incomplete_parquet_filepath);
+                            panic!("unable to remove zero content file");
+                        });
                 }
 
                 if exit == false {
@@ -858,7 +868,10 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         }
         debug!("[{}] closing parquet {} cost: {}, is final_run {}", partition, self.file_path, stats.elapsed(), final_run);
         debug!("[{}] output_loop return, reason: {:?}, is final_run {}", partition, reason, final_run);
-        info!("[{}] {} lines written to parquet file {} cost {}", partition, lines_written, self.file_path, total.elapsed());
+        info!("[{}] {} lines written to parquet file {} reason {:?} cost {}", partition, lines_written, self.file_path, reason, total.elapsed());
+        if lines_written == 0 {
+            assert!(receipts.len() == 0);
+        }
 
         Ok((reason, receipts))
     }
