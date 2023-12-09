@@ -485,6 +485,7 @@ fn main() {
                         recv_max_msgs, recv_pollwait_sec,
                         recv_idle_sec, recv_queue_len, workers, mgr).await;
                     exec.entry(quit.clone()).await;
+                    exec.mgr.shutdown().await;
                 });
             }
 
