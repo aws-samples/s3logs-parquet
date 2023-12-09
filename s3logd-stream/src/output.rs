@@ -350,7 +350,7 @@ impl Channel {
         self.put_sender();
     }
 
-    pub async fn close(mut self) {
+    pub async fn close(&mut self) {
         
         let mut receipts = self.receipts.lock().await;
 
@@ -631,7 +631,7 @@ impl Manager {
             let mut final_run = false;
             let mut next_rx = rx;
             let mut this_channel: Option<Channel> = None;
-            let mut close_channel = false;
+            let mut exit = false;
 
             while quit.load(Ordering::SeqCst) != true {
 
@@ -662,15 +662,15 @@ impl Manager {
                     },
                     Ok(Reason::Quit) => {
                         debug!("[{}] output loop return reason: Quit", partition);
-                        close_channel = true;
+                        exit = true;
                     },
                     Ok(Reason::MaxLinesReached) => {
                         debug!("[{}] output loop return reason: MaxLinesReached", partition);
-                        close_channel = false;
+                        exit = false;
                     },
                     Ok(Reason::MaxTimeReached) => {
                         debug!("[{}] output loop return reason: MaxTimeReached", partition);
-                        close_channel = false;
+                        exit = false;
                     },
                     Ok(Reason::MaxTimeReachedEmpty) => {
                         let channel = channels.remove(partition).await;
@@ -681,18 +681,18 @@ impl Manager {
                             next_rx = channel.get_rx().clone();
                             this_channel = Some(channel);
                             debug!("[{}] output loop return reason MaxTimeReachedEmpty => need a final run", partition);
-                            close_channel = false;
+                            exit = false;
                         } else {
                             debug!("[{}] output loop return reason MaxTimeReachedEmpty => channel is clean, let's quit", partition);
                             this_channel = Some(channel);
-                            close_channel = true;
+                            exit = true;
                         }
                     },
                     Ok(Reason::Final) => {
                         debug!("[{}] output loop return reason Final => time to close this channel", partition);
                         assert!(next_rx.len() == 0);
                         assert!(final_run == true);
-                        close_channel = true;
+                        exit = true;
                     },
                 }
 
@@ -718,16 +718,16 @@ impl Manager {
                     panic!("failed to upload final output to s3");
                 }
 
+                // 3. callback all token
+                if let Some(ref mut channel) = this_channel {
+                    channel.close().await;
+                }
 
-                if close_channel == false {
+                if exit == false {
                     // just rotate output file, don't close channel
                     continue;
                 }
 
-                // 3. close channel and callback all token
-                if let Some(channel) = this_channel {
-                    channel.close().await;
-                }
                 debug!("[{}] before channel closed", partition);
                 break;
             }
