@@ -152,13 +152,6 @@ impl Executor {
 
             if quit.load(Ordering::SeqCst) {
                 info!("catch quit signal, wakeup all worker to quit ...");
-                for _ in 0..self.workers {
-                    // wake up worker to react quit
-                    let qmsg = Message::builder()
-                                .message_id("LET_ME_QUIT")
-                                .build();
-                    self.queue.push(qmsg).await;
-                }
                 info!("retrieve message loop quit ...");
                 break;
             }
@@ -263,9 +256,16 @@ impl Executor {
 
     async fn handle_one_msg(&self, msg: Message) -> Result<(), Error> {
 
-        let null = "".to_string();
-        let body = msg.body.as_ref().unwrap_or(&null);
-        let receipt: String = msg.receipt_handle.as_ref().unwrap().to_string();
+        let body = if msg.body.is_some() {
+            msg.body.as_ref().unwrap()
+        } else {
+            panic!("invalid SQS message body {:?}", msg);
+        };
+        let receipt: String = if msg.receipt_handle.is_some() {
+            msg.receipt_handle.as_ref().unwrap().to_string()
+        } else {
+            panic!("invalid SQS message receipt handle {:?}", msg);
+        };
 
         if let Ok(s3event) = serde_json::from_str::<S3Event>(body) {
             if s3event.records.len() > 1 {
