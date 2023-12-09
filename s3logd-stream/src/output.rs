@@ -703,18 +703,22 @@ impl Manager {
                 }
 
                 debug!("[{}] before channel close", partition);
-                // 1. rename output file to final name
-                tokio::fs::rename(&incomplete_parquet_filepath, &parquet_filepath)
+                let uploading_filename = format!("{}.uploading", final_filename);
+                let uploading_parquet_filepath = format!("{}/{}", output_temp_dir, uploading_filename);
+
+                // 1. rename output file to uploading name
+                tokio::fs::rename(&incomplete_parquet_filepath, &uploading_parquet_filepath)
                     .await
                     .map_err(|e| {
-                        error!("failed to rename {} to {}", incomplete_parquet_filepath, parquet_filepath);
+                        error!("failed to rename {} to {}", incomplete_parquet_filepath, uploading_parquet_filepath);
                         panic!("unable to rename file");
                     });
+
                 // 2. upload to S3
                 let key = format!("stream/{}", final_filename);
-                let res = tm.upload_object(&parquet_filepath, "ahaparquet", &key, 0).await;
+                let res = tm.upload_object(&uploading_parquet_filepath, "ahaparquet", &key, 0).await;
                 if res.is_ok() {
-                    tokio::fs::remove_file(&parquet_filepath)
+                    tokio::fs::remove_file(&uploading_parquet_filepath)
                         .await
                         .map_err(|e| {
                             error!("failed to remove {}", parquet_filepath);
@@ -723,6 +727,13 @@ impl Manager {
                 } else {
                     panic!("failed to upload final output to s3");
                 }
+
+                tokio::fs::rename(&uploading_parquet_filepath, &parquet_filepath)
+                    .await
+                    .map_err(|e| {
+                        error!("failed to rename {} to {}", uploading_parquet_filepath, parquet_filepath);
+                        panic!("unable to rename file");
+                    });
 
                 // 3. callback all receipts
                 while let Some(receipt) = receipts.pop() {
