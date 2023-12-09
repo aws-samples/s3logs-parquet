@@ -260,8 +260,8 @@ struct Channel {
     //state: Arc<Mutex<ChannelGateState>>,
     tx_count: Arc<AtomicUsize>,
     rx_count: Arc<AtomicUsize>,
-    tx: Sender<Vec<LogFields>>,
-    rx: Receiver<Vec<LogFields>>,
+    tx: Sender<(Vec<LogFields>, Receipt)>,
+    rx: Receiver<(Vec<LogFields>, Receipt)>,
     receipts: Arc<Mutex<Vec<Receipt>>>,
 }
 
@@ -302,7 +302,7 @@ impl Channel {
         self.rx_count.fetch_sub(1, Ordering::SeqCst);
     }
 
-    pub fn get_sender(&self) -> Sender<Vec<LogFields>> {
+    pub fn get_sender(&self) -> Sender<(Vec<LogFields>, Receipt)> {
         self.inc_sender();
         self.tx.clone()
     }
@@ -311,7 +311,7 @@ impl Channel {
         self.dec_sender();
     }
 
-    pub fn get_rx(&self) -> Receiver<Vec<LogFields>> {
+    pub fn get_rx(&self) -> Receiver<(Vec<LogFields>, Receipt)> {
         self.inc_rx();
         self.rx.clone()
     }
@@ -319,11 +319,13 @@ impl Channel {
     pub async fn do_send(&self, logs: Vec<LogFields>, receipt: Receipt) {
 
         let mut logs_next = logs;
+        let mut receipt_next = receipt;
         loop {
-            match self.get_sender().try_send(logs_next) {
-                Err(crossbeam::channel::TrySendError::Full(logs)) => {
+            match self.get_sender().try_send((logs_next, receipt_next)) {
+                Err(crossbeam::channel::TrySendError::Full((logs, receipt))) => {
                     tokio::time::sleep(tokio::time::Duration::from_millis(config_channel_full_busywait)).await;
                     logs_next = logs;
+                    receipt_next = receipt;
                     continue;
                 },
                 Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
@@ -343,9 +345,6 @@ impl Channel {
             todo!();
         }
         */
-
-        let mut receipts = self.receipts.lock().await;
-        receipts.push(receipt);
 
         self.put_sender();
     }
@@ -393,7 +392,7 @@ impl Channels {
     }
     */
 
-    async fn create(&self, ts: TimeStamp) -> Receiver<Vec<LogFields>> {
+    async fn create(&self, ts: TimeStamp) -> Receiver<(Vec<LogFields>, Receipt)> {
         let mut inner = self.inner.write().await;
         if let Some(channel) = inner.get(&ts) {
             // channel already exists
@@ -617,7 +616,7 @@ impl Manager {
     }
 
     // start a new task for specific date partition
-    pub async fn start_output_wr(&self, partition: TimeStamp, rx: Receiver<Vec<LogFields>>) -> Result<()> {
+    pub async fn start_output_wr(&self, partition: TimeStamp, rx: Receiver<(Vec<LogFields>, Receipt)>) -> Result<()> {
 
         let quit = self.quit.clone();
         let schema_ref = self.config.schema_ref.clone();
@@ -632,6 +631,7 @@ impl Manager {
             let mut next_rx = rx;
             let mut this_channel: Option<Channel> = None;
             let mut exit = false;
+            let mut receipts: Vec<Receipt> = Vec::new();
 
             while quit.load(Ordering::SeqCst) != true {
 
@@ -651,28 +651,31 @@ impl Manager {
                 let wr = AsyncParquetOutput::new(parquet_file, &incomplete_parquet_filepath, buffer_size, schema_ref.clone(), writer_props.clone(), ctx);
 
                 match wr.output_loop(partition, next_rx.clone(), final_run).await {
-                    Ok(Reason::Unkown) => {
+                    Ok((Reason::Unkown, _)) => {
                         panic!("[{}] output loop return reason unkown, why?", partition);
                     },
                     Err(e) => {
                         panic!("failed to close parquet output file: {}", e);
                     },
-                    Ok(Reason::ChannelDisconnected) => {
+                    Ok((Reason::ChannelDisconnected, _)) => {
                         panic!("[{}] output loop return reason Reason::ChannelDisconnected", partition);
                     },
-                    Ok(Reason::Quit) => {
+                    Ok((Reason::Quit, r)) => {
                         debug!("[{}] output loop return reason: Quit", partition);
                         exit = true;
+                        receipts = r;
                     },
-                    Ok(Reason::MaxLinesReached) => {
+                    Ok((Reason::MaxLinesReached, r)) => {
                         debug!("[{}] output loop return reason: MaxLinesReached", partition);
                         exit = false;
+                        receipts = r;
                     },
-                    Ok(Reason::MaxTimeReached) => {
+                    Ok((Reason::MaxTimeReached, r)) => {
                         debug!("[{}] output loop return reason: MaxTimeReached", partition);
                         exit = false;
+                        receipts = r;
                     },
-                    Ok(Reason::MaxTimeReachedEmpty) => {
+                    Ok((Reason::MaxTimeReachedEmpty, r)) => {
                         let channel = channels.remove(partition).await;
                         if channel.count_sender() > 0 || channel.count_queue() > 0 {
                             // in case their is someone working on this channel or data still on queue,
@@ -682,17 +685,20 @@ impl Manager {
                             this_channel = Some(channel);
                             debug!("[{}] output loop return reason MaxTimeReachedEmpty => need a final run", partition);
                             exit = false;
+                            receipts = r;
                         } else {
                             debug!("[{}] output loop return reason MaxTimeReachedEmpty => channel is clean, let's quit", partition);
                             this_channel = Some(channel);
                             exit = true;
+                            receipts = r;
                         }
                     },
-                    Ok(Reason::Final) => {
+                    Ok((Reason::Final, r)) => {
                         debug!("[{}] output loop return reason Final => time to close this channel", partition);
                         assert!(next_rx.len() == 0);
                         assert!(final_run == true);
                         exit = true;
+                        receipts = r;
                     },
                 }
 
@@ -718,9 +724,9 @@ impl Manager {
                     panic!("failed to upload final output to s3");
                 }
 
-                // 3. callback all token
-                if let Some(ref mut channel) = this_channel {
-                    channel.close().await;
+                // 3. callback all receipts
+                while let Some(receipt) = receipts.pop() {
+                    receipt.close().await;
                 }
 
                 if exit == false {
@@ -779,21 +785,25 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         }
     }
 
-    pub async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<Vec<LogFields>>, final_run: bool) -> Result<Reason> {
+    // when this function return, output file is closed
+    pub async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<(Vec<LogFields>, Receipt)>, final_run: bool) -> Result<(Reason, Vec<Receipt>)> {
 
         debug!("[{}] output_loop started, is final_run {}", partition, final_run);
         let mut reason = Reason::Unkown;
         let mut lines_written = 0;
         let mut last_activity = std::time::SystemTime::now();
         let mut total = TimeStats::new();
+        let mut receipts: Vec<Receipt> = Vec::new();
 
         while self.ctx.quit.load(Ordering::SeqCst) != true {
 
             match output_channel.try_recv() {
-                Ok(lines) => {
+                Ok((lines, receipt)) => {
                     let count = lines.len();
                     self.append_lines(lines).await;
                     lines_written += count;
+                    receipts.push(receipt);
+
                     if lines_written >= output_threshold_lines && !final_run {
                         reason = Reason::MaxLinesReached;
                         break;
@@ -840,7 +850,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         debug!("[{}] output_loop return, reason: {:?}, is final_run {}", partition, reason, final_run);
         info!("[{}] {} lines written to parquet file {} cost {}", partition, lines_written, self.file_path, total.elapsed());
 
-        Ok(reason)
+        Ok((reason, receipts))
     }
 
     pub fn vec_to_columns(&self, v: Vec<LogFields>) -> ArrowResult<Vec<ArrayRef>> {
