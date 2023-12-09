@@ -26,6 +26,13 @@ use crate::conf::ParquetWriterConfigReader;
 
 const S3_LOG_DATATIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
 
+const file_receipt_dir: &str = "/backup/stream";
+const output_temp_dir:&str = "/backup/stream";
+const hourly_partition: bool = false;
+const timezone: &str = "UTC+8";
+const output_threshold_lines: usize = 10000000;
+const output_threshold_maxidle: u64 = 60;
+
 pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
 type TimeStamp = usize;
@@ -122,7 +129,7 @@ impl Receipt {
         }
 
         // gen a file receipt
-        let file_path = format!("/tmp/receipt_{}", Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+        let file_path = format!("{}/file_{}.receipt", file_receipt_dir, Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
 
         self.file_receipt = file_path;
 
@@ -449,7 +456,7 @@ impl Manager {
             region: region.to_string(),
             prefix: prefix.to_string(),
             line_parser: LineParser::new(),
-            time_partition: TimePartition::new("UTC+8", true),
+            time_partition: TimePartition::new(timezone, hourly_partition),
             config: config,
             chans: Channels::new(),
             tasks: Arc::new(Mutex::new(Vec::new())),
@@ -594,7 +601,6 @@ impl Manager {
         let writer_props = self.config.writer_props.clone();
         let channels = self.chans.clone();
 
-        let dir = "/tmp";
         let tm = self.tm.clone();
 
         let join = tokio::task::spawn(async move {
@@ -613,8 +619,8 @@ impl Manager {
                 let final_filename = format!("output_{}_{}.parquet", partition, Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
                 let incomplete_filename = format!("{}.incomplete", final_filename);
 
-                let parquet_filepath = format!("{}/{}", dir, final_filename);
-                let incomplete_parquet_filepath = format!("{}/{}", dir, incomplete_filename);
+                let parquet_filepath = format!("{}/{}", output_temp_dir, final_filename);
+                let incomplete_parquet_filepath = format!("{}/{}", output_temp_dir, incomplete_filename);
 
                 debug!("starting task for output parquet file: {}", incomplete_parquet_filepath);
                 let buffer_size = 100 * 1024 * 1024;
@@ -765,7 +771,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
                     let count = lines.len();
                     self.append_lines(lines).await;
                     lines_written += count;
-                    if lines_written >= 1500000 && !final_run {
+                    if lines_written >= output_threshold_lines && !final_run {
                         reason = Reason::MaxLinesReached;
                         break;
                     }
@@ -778,7 +784,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
                         reason = Reason::Final;
                         break;
                     }
-                    if last_activity.elapsed().unwrap() >= std::time::Duration::new(60, 0) {
+                    if last_activity.elapsed().unwrap() >= std::time::Duration::new(output_threshold_maxidle, 0) {
                         if output_channel.len() == 0 {
                             reason = Reason::MaxTimeReachedEmpty;
                         } else {
