@@ -339,21 +339,11 @@ impl Channel {
                     panic!("found channel disconnected while trying to send new logs to output");
                 },
                 Ok(_) => {
+                    self.put_sender();
                     break;
                 },
             }
         };
-
-        /*
-           unbounded code
-        let res = self.get_sender().try_send(logs);
-        if res.is_err() {
-            warn!("err while send logs to output: {:?}", res.unwrap());
-            todo!();
-        }
-        */
-
-        self.put_sender();
     }
 
     pub async fn close(&mut self) {
