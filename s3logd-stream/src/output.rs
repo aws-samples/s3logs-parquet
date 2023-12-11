@@ -26,8 +26,8 @@ use s3logs::transfer::TransferManager;
 use crate::conf::ParquetWriterConfigReader;
 
 const S3_LOG_DATETIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
-const DATE_TIME_FMT: &str = "%Y-%m-%d";
-const S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY: &str = r#"(\d{4}-\d{2}-\d{2})-00-00-00-[A-Z0-9]{16}$"#;
+const DATE_TIME_FMT: &str = "%Y-%m-%d-%H-%M-%S";
+const S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY: &str = r#"(\d{4}-\d{2}-\d{2}-00-00-00)-[A-Z0-9]{16}$"#;
 
 const file_receipt_dir: &str = "/backup/stream";
 const output_temp_dir:&str = "/backup/stream";
@@ -607,7 +607,7 @@ impl Manager {
             let caps = re.captures(key.as_bytes()).unwrap();
             if let Some(date) = caps.and_then(|cap| cap.get(1)) {
                 let date_str = std::str::from_utf8(date.as_bytes()).unwrap();
-                let part_ts = DateTime::parse_from_str(date_str, DATE_TIME_FMT).unwrap().timestamp();
+                let part_ts = NaiveDateTime::parse_from_str(date_str, DATE_TIME_FMT).unwrap().timestamp();
                 self.lines_to_partition_passthrough(part_ts as PartitionedTimeStamp, lines).await?
             } else {
                 error!("log object key {} is not in event time format, this is passthrough mode, please correct it", key);
