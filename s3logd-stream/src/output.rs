@@ -328,12 +328,14 @@ impl Channel {
         loop {
             match self.get_sender().try_send((logs_next, receipt_next)) {
                 Err(crossbeam::channel::TrySendError::Full((logs, receipt))) => {
+                    self.put_sender();
                     tokio::time::sleep(tokio::time::Duration::from_millis(config_channel_full_busywait)).await;
                     logs_next = logs;
                     receipt_next = receipt;
                     continue;
                 },
                 Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                    self.put_sender();
                     panic!("found channel disconnected while trying to send new logs to output");
                 },
                 Ok(_) => {
