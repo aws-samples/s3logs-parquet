@@ -798,7 +798,7 @@ impl Manager {
 
         let bucket = self.config.bucket.clone();
         let prefix = self.config.prefix.clone();
-        let date_partition_prefix = self.config.date_partition_prefix.clone();
+        let date_partition_prefix = self.get_date_partitioned_prefix(partition);
 
         let join = tokio::task::spawn(async move {
 
