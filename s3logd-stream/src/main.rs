@@ -485,7 +485,6 @@ fn main() {
 
             let mut set = tokio::task::JoinSet::new();
 
-
             for i in 0..executors {
                 let quit = quit.clone();
                 let region = region.to_string();

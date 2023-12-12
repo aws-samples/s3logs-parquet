@@ -446,11 +446,11 @@ impl Channel {
         self.rx.clone()
     }
 
-    pub async fn do_send(&self, logs: Vec<LogFields>, receipt: Receipt, channel_full_busywait: u64) {
+    pub async fn do_send(&self, logs: Vec<LogFields>, receipt: Receipt, quit: Arc<AtomicBool>, channel_full_busywait: u64) {
 
         let mut logs_next = logs;
         let mut receipt_next = receipt;
-        loop {
+        while quit.load(Ordering::SeqCst) != true {
             match self.get_sender().try_send((logs_next, receipt_next)) {
                 Err(crossbeam::channel::TrySendError::Full((logs, receipt))) => {
                     self.put_sender();
@@ -687,13 +687,13 @@ impl Manager {
     pub async fn send_by_partition(&self, partition: PartitionedTimeStamp, logs: Vec<LogFields>, receipt: Receipt) {
 
         if let Some(channel) = self.chans.get(partition).await {
-            channel.do_send(logs, receipt, self.config.channel_full_busywait).await;
+            channel.do_send(logs, receipt, self.quit.clone(), self.config.channel_full_busywait).await;
             return;
         }
 
         // if no channel for this partition found, let's create a new one
         if let Some(channel) = self.safe_start_output_wr(partition).await {
-            channel.do_send(logs, receipt, self.config.channel_full_busywait).await;
+            channel.do_send(logs, receipt, self.quit.clone(), self.config.channel_full_busywait).await;
         }
     }
 
