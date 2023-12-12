@@ -19,6 +19,7 @@ use crossbeam::channel::{Sender, Receiver};
 use serde::{Deserialize, Serialize};
 use rand::distributions::{Alphanumeric, DistString};
 use pcre2::bytes::{RegexBuilder, Regex};
+use config::Config;
 use aws_sdk_sqs::{Client, Region};
 use s3logs::utils::LineParser;
 use s3logs::stats::TimeStats;
@@ -29,19 +30,143 @@ const S3_LOG_DATETIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
 const DATE_TIME_FMT: &str = "%Y-%m-%d-%H-%M-%S";
 const S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY: &str = r#"(\d{4}-\d{2}-\d{2}-00-00-00)-[A-Z0-9]{16}$"#;
 
-const file_receipt_dir: &str = "/backup/stream";
-const output_temp_dir:&str = "/backup/stream";
-const hourly_partition: bool = false;
-const timezone: &str = "UTC+8";
-const output_threshold_lines: usize = 10000000;
-const output_threshold_maxidle: u64 = 60;
-const config_channel_cap: usize = 100;
-const config_channel_full_busywait: u64 = 100;
+const DEFAULT_HOURLY_PARTITION: bool = false;
+const DEFAULT_TIMEZONE: &str = "UTC+8";
+const DEFAULT_THRESHOLD_LINES: u64 = 10000000;
+const DEFAULT_THRESHOLD_MAXIDLE: u64 = 60;
+const DEFAULT_CHANNEL_CAPACITY: u64 = 10;
+const DEFAULT_CHANNEL_FULL_BUSYWAIT: u64 = 100;
+const DEFAULT_EVENT_TIME_KEY_FORMAT: bool = true;
+const DEFAULT_PASSTHROUGH_MODE: bool = true;
 
 pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
 type TimeStamp = usize;
 type PartitionedTimeStamp = usize;
+
+#[derive(Clone)]
+pub struct OutputConfig {
+    region: String,
+    bucket: String,
+    prefix: String,
+    file_receipt_dir: String,
+    incomplete_output_dir: String,
+    hourly_partition: bool,
+    timezone: String,
+    threshold_lines: usize,
+    threshold_maxidle: u64,
+    channel_capacity: usize,
+    channel_full_busywait: u64,
+    writer_props_filepath: String,
+    schema_filepath: String,
+    event_time_key_format: bool,
+    passthrough_mode: bool,
+}
+
+impl OutputConfig {
+    pub fn new(config: &str) -> Self {
+
+        let table = Config::builder()
+            .add_source(config::File::with_name(config))
+            .build()
+            .expect("unable to open config file")
+            .get_table("OUTPUT")
+            .expect("unable to get OUTPUT section");
+
+        let region = table.get("region")
+                        .expect("unable to get region from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect region field in config");
+        let bucket = table.get("bucket")
+                        .expect("unable to get bucket from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect bucket field in config");
+        let prefix = table.get("prefix")
+                        .expect("unable to get prefix from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect prefix field in config");
+        let file_receipt_dir = table.get("file_receipt_dir")
+                        .expect("unable to get file_receipt_dir from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect file_receipt_dir field in config");
+        let incomplete_output_dir = table.get("incomplete_output_dir")
+                        .expect("unable to get incomplete_output_dir from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect incomplete_output_dir field in config");
+        let hourly_partition = table.get("hourly_partition")
+                        .unwrap_or(&config::Value::from(DEFAULT_HOURLY_PARTITION))
+                        .to_owned()
+                        .into_bool()
+                        .expect("incorrect hourly_partition field in config");
+        let timezone = table.get("timezone")
+                        .unwrap_or(&config::Value::from(DEFAULT_TIMEZONE))
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect timezone field in config");
+        let threshold_lines = table.get("threshold_lines")
+                        .unwrap_or(&config::Value::from(DEFAULT_THRESHOLD_LINES))
+                        .to_owned()
+                        .into_uint()
+                        .expect("incorrect threshold_lines field in config");
+        let threshold_maxidle = table.get("threshold_maxidle")
+                        .unwrap_or(&config::Value::from(DEFAULT_THRESHOLD_MAXIDLE))
+                        .to_owned()
+                        .into_uint()
+                        .expect("incorrect threshold_maxidle field in config");
+        let channel_capacity = table.get("config_channel_capacity")
+                        .unwrap_or(&config::Value::from(DEFAULT_CHANNEL_CAPACITY))
+                        .to_owned()
+                        .into_uint()
+                        .expect("incorrect config_channel_capacity field in config");
+        let channel_full_busywait = table.get("channel_full_busywait")
+                        .unwrap_or(&config::Value::from(DEFAULT_CHANNEL_FULL_BUSYWAIT))
+                        .to_owned()
+                        .into_uint()
+                        .expect("incorrect config_channel_full_busywait field in config");
+        let writer_props_filepath = table.get("writer_props_filepath")
+                        .expect("unable to get writer_props_filepath from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect writer_props_filepath field in config");
+        let schema_filepath = table.get("schema_filepath")
+                        .expect("unable to get schema_filepath from config")
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect schema_filepath field in config");
+        let event_time_key_format = table.get("event_time_key_format")
+                        .unwrap_or(&config::Value::from(DEFAULT_EVENT_TIME_KEY_FORMAT))
+                        .to_owned()
+                        .into_bool()
+                        .expect("incorrect event_time_key_format field in config");
+        let passthrough_mode = table.get("passthrough_mode")
+                        .unwrap_or(&config::Value::from(DEFAULT_PASSTHROUGH_MODE))
+                        .to_owned()
+                        .into_bool()
+                        .expect("incorrect passthrough_mode field in config");
+        Self {
+            region: region,
+            bucket: bucket,
+            prefix: prefix,
+            file_receipt_dir: file_receipt_dir,
+            incomplete_output_dir: incomplete_output_dir,
+            hourly_partition: hourly_partition,
+            timezone: timezone,
+            threshold_lines: threshold_lines as usize,
+            threshold_maxidle: threshold_maxidle,
+            channel_capacity: channel_capacity as usize,
+            channel_full_busywait: channel_full_busywait,
+            writer_props_filepath: writer_props_filepath,
+            schema_filepath: schema_filepath,
+            event_time_key_format: event_time_key_format,
+            passthrough_mode: passthrough_mode,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct TimePartition {
@@ -125,7 +250,7 @@ pub struct Receipt {
 
 impl Receipt {
 
-    async fn finalize(&mut self, start: usize, count: usize) {
+    async fn finalize(&mut self, file_receipt_dir: &str, start: usize, count: usize) {
         self.line_start = start;
         self.line_count = count;
 
@@ -271,8 +396,8 @@ struct Channel {
 }
 
 impl Channel {
-    pub fn new() -> Self {
-        let (tx, rx) = crossbeam::channel::bounded(config_channel_cap);
+    pub fn new(channel_cap: usize) -> Self {
+        let (tx, rx) = crossbeam::channel::bounded(channel_cap);
         Self {
             //state: Arc::new(Mutex::new(ChannelGateState::Initialized)),
             tx_count: Arc::new(AtomicUsize::new(0)),
@@ -321,7 +446,7 @@ impl Channel {
         self.rx.clone()
     }
 
-    pub async fn do_send(&self, logs: Vec<LogFields>, receipt: Receipt) {
+    pub async fn do_send(&self, logs: Vec<LogFields>, receipt: Receipt, channel_full_busywait: u64) {
 
         let mut logs_next = logs;
         let mut receipt_next = receipt;
@@ -329,7 +454,7 @@ impl Channel {
             match self.get_sender().try_send((logs_next, receipt_next)) {
                 Err(crossbeam::channel::TrySendError::Full((logs, receipt))) => {
                     self.put_sender();
-                    tokio::time::sleep(tokio::time::Duration::from_millis(config_channel_full_busywait)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(channel_full_busywait)).await;
                     logs_next = logs;
                     receipt_next = receipt;
                     continue;
@@ -389,14 +514,14 @@ impl Channels {
     }
     */
 
-    async fn create(&self, ts: TimeStamp) -> Receiver<(Vec<LogFields>, Receipt)> {
+    async fn create(&self, ts: TimeStamp, chan_cap: usize) -> Receiver<(Vec<LogFields>, Receipt)> {
         let mut inner = self.inner.write().await;
         if let Some(channel) = inner.get(&ts) {
             // channel already exists
             return channel.get_rx()
         }
 
-        let channel = Channel::new();
+        let channel = Channel::new(chan_cap);
         let rx = channel.get_rx();
         inner.insert(ts, channel);
         rx
@@ -426,12 +551,10 @@ pub struct Context {
 
 #[derive(Clone)]
 pub struct Manager {
-    bucket: String,
-    region: String,
-    prefix: String,
     line_parser: LineParser,
     time_partition: TimePartition,
-    config: WriterConfig,
+    writer_config: WriterConfig,
+    config: OutputConfig,
     chans: Channels,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     quit: Arc<AtomicBool>,
@@ -442,40 +565,31 @@ pub struct Manager {
 
 impl Manager {
 
-    pub fn new(quit: Arc<AtomicBool>) -> Self {
+    pub fn new(quit: Arc<AtomicBool>, config: OutputConfig) -> Self {
 
-        let wr_props_fullpath = "/tmp/parquet_writer_properties.ini";
-        let schema_filepath = "/tmp/parquet.schema";
-        let bucket = "ahaparquet";
-        let region = "ap-northeast-1";
-        let prefix = "s3logs";
-        let sqs_url = "https://sqs.ap-northeast-1.amazonaws.com/911329921905/s3logsq1";
-        let event_time_key_format = true;
-        let utc0_mode = true;
-        const hourly_partition: bool = false;
-
-        let message_type = std::fs::read_to_string(&schema_filepath).expect("unable to read parquet schema config");
+        let message_type = std::fs::read_to_string(&config.schema_filepath).expect("unable to read parquet schema config");
         let pq_schema = parquet::schema::parser::parse_message_type(&message_type).expect("Expected valid schema");
 
         // convert parquet schemd to arrow schema
         let schema_desc = parquet::schema::types::SchemaDescriptor::new(Arc::new(pq_schema));
         let schema = parquet::arrow::parquet_to_arrow_schema(&schema_desc, None).expect("unable to convert schema from parquet to arrow");
 
-        let writer_props = ParquetWriterConfigReader::new(&wr_props_fullpath);
+        let writer_props = ParquetWriterConfigReader::new(&config.writer_props_filepath);
 
-        let config = WriterConfig {
+        let writer_config = WriterConfig {
             schema_ref: Arc::new(schema),
             writer_props: writer_props,
         };
 
+        let region = config.region.clone();
         let tm = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
-                TransferManager::new(region).await
+                TransferManager::new(&region).await
             })
         });
 
-        let re_event_time_key = if event_time_key_format && utc0_mode {
-            assert!(hourly_partition == false);
+        let re_event_time_key = if config.event_time_key_format && config.passthrough_mode {
+            assert!(config.hourly_partition == false);
             let re = RegexBuilder::new()
                 .jit(true)
                 .build(S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY)
@@ -486,11 +600,9 @@ impl Manager {
         };
 
         Self {
-            bucket: bucket.to_string(),
-            region: region.to_string(),
-            prefix: prefix.to_string(),
             line_parser: LineParser::new(),
-            time_partition: TimePartition::new(timezone, hourly_partition),
+            time_partition: TimePartition::new(&config.timezone, config.hourly_partition),
+            writer_config: writer_config,
             config: config,
             chans: Channels::new(),
             tasks: Arc::new(Mutex::new(Vec::new())),
@@ -575,13 +687,13 @@ impl Manager {
     pub async fn send_by_partition(&self, partition: PartitionedTimeStamp, logs: Vec<LogFields>, receipt: Receipt) {
 
         if let Some(channel) = self.chans.get(partition).await {
-            channel.do_send(logs, receipt).await;
+            channel.do_send(logs, receipt, self.config.channel_full_busywait).await;
             return;
         }
 
         // if no channel for this partition found, let's create a new one
         if let Some(channel) = self.safe_start_output_wr(partition).await {
-            channel.do_send(logs, receipt).await;
+            channel.do_send(logs, receipt, self.config.channel_full_busywait).await;
         }
     }
 
@@ -626,7 +738,7 @@ impl Manager {
 
             let mut receipt = receipt_gen.next().await;
             line_count = logs.len();
-            receipt.finalize(line_start, line_count).await;
+            receipt.finalize(&self.config.file_receipt_dir, line_start, line_count).await;
 
             self.send_by_partition(partition, logs, receipt).await;
             line_start += line_count;
@@ -644,7 +756,7 @@ impl Manager {
                 return Some(channel);
             }
 
-            let rx = self.chans.create(partition).await;
+            let rx = self.chans.create(partition, self.config.channel_capacity).await;
             debug!("new channel created for date partition {}", partition);
 
             let res = self.start_output_wr(partition, rx).await;
@@ -664,11 +776,14 @@ impl Manager {
     pub async fn start_output_wr(&self, partition: TimeStamp, rx: Receiver<(Vec<LogFields>, Receipt)>) -> Result<()> {
 
         let quit = self.quit.clone();
-        let schema_ref = self.config.schema_ref.clone();
-        let writer_props = self.config.writer_props.clone();
+        let schema_ref = self.writer_config.schema_ref.clone();
+        let writer_props = self.writer_config.writer_props.clone();
         let channels = self.chans.clone();
 
         let tm = self.tm.clone();
+        let threshold_maxidle = self.config.threshold_maxidle;
+        let threshold_lines = self.config.threshold_lines;
+        let incomplete_output_dir = self.config.incomplete_output_dir.clone();
 
         let join = tokio::task::spawn(async move {
 
@@ -686,13 +801,14 @@ impl Manager {
                 let final_filename = format!("output_{}_{}.parquet", partition, Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
                 let incomplete_filename = format!("{}.incomplete", final_filename);
 
-                let parquet_filepath = format!("{}/{}", output_temp_dir, final_filename);
-                let incomplete_parquet_filepath = format!("{}/{}", output_temp_dir, incomplete_filename);
+                let parquet_filepath = format!("{}/{}", &incomplete_output_dir, final_filename);
+                let incomplete_parquet_filepath = format!("{}/{}", &incomplete_output_dir, incomplete_filename);
 
                 debug!("starting task for output parquet file: {}", incomplete_parquet_filepath);
                 let buffer_size = 100 * 1024 * 1024;
                 let parquet_file = tokio::fs::File::create(&incomplete_parquet_filepath).await.unwrap();
-                let wr = AsyncParquetOutput::new(parquet_file, &incomplete_parquet_filepath, buffer_size, schema_ref.clone(), writer_props.clone(), ctx);
+                let wr = AsyncParquetOutput::new(parquet_file, &incomplete_parquet_filepath,
+                    buffer_size, schema_ref.clone(), writer_props.clone(), ctx, threshold_maxidle, threshold_lines);
 
                 match wr.output_loop(partition, next_rx.clone(), final_run).await {
                     Ok((Reason::Unkown, _)) => {
@@ -748,7 +864,7 @@ impl Manager {
                 if receipts.len() > 0 {
 
                     let uploading_filename = format!("{}.uploading", final_filename);
-                    let uploading_parquet_filepath = format!("{}/{}", output_temp_dir, uploading_filename);
+                    let uploading_parquet_filepath = format!("{}/{}", &incomplete_output_dir, uploading_filename);
 
                     // 1. rename output file to uploading name
                     tokio::fs::rename(&incomplete_parquet_filepath, &uploading_parquet_filepath)
@@ -828,11 +944,14 @@ pub struct AsyncParquetOutput<W> {
     ctx: Context,
     max_fields: usize,
     file_path: String,
+    threshold_lines: usize,
+    threshold_maxidle: u64
 }
 
 impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
 
-    pub fn new(buf_wr: W, file_path: &str, buffer_size: usize, schema_ref: SchemaRef, writer_props: WriterProperties, ctx: Context) -> Self {
+    pub fn new(buf_wr: W, file_path: &str, buffer_size: usize, schema_ref: SchemaRef, writer_props: WriterProperties,
+            ctx: Context, thr_maxidle: u64, thr_lines: usize) -> Self {
 
         let max = schema_ref.fields.len();
 
@@ -845,6 +964,8 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
             ctx: ctx,
             max_fields: max,
             file_path: file_path.to_string(),
+            threshold_lines: thr_lines,
+            threshold_maxidle: thr_maxidle,
         }
     }
 
@@ -867,7 +988,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
                     lines_written += count;
                     receipts.push(receipt);
 
-                    if lines_written >= output_threshold_lines && !final_run {
+                    if lines_written >= self.threshold_lines && !final_run {
                         reason = Reason::MaxLinesReached;
                         break;
                     }
@@ -880,7 +1001,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
                         reason = Reason::Final;
                         break;
                     }
-                    if last_activity.elapsed().unwrap() >= std::time::Duration::new(output_threshold_maxidle, 0) {
+                    if last_activity.elapsed().unwrap() >= std::time::Duration::new(self.threshold_maxidle, 0) {
                         if output_channel.len() == 0 {
                             reason = Reason::MaxTimeReachedEmpty;
                         } else {

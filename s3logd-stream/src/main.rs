@@ -4,6 +4,7 @@ use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::VecDeque;
+use std::cell::OnceCell;
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio::io::{Error, ErrorKind};
@@ -319,8 +320,8 @@ fn main() {
             .add_source(config::File::with_name(&config))
             .build()
             .expect("unable to open config file")
-            .get_table("DEFAULT")
-            .expect("unable to get DEFAULT section");
+            .get_table("STREAM")
+            .expect("unable to get STREAM section");
     let region = table.get("region")
                         .expect("unable to get region from config")
                         .to_owned()
@@ -386,6 +387,8 @@ fn main() {
     if recv_queue_len < recv_max_msgs {
         recv_queue_len = recv_max_msgs;
     }
+
+    let output_config = output::OutputConfig::new(&config);
 
     let loglevel = std::env::var("RUST_LOG").unwrap_or(config_loglevel.to_string());
 
@@ -473,14 +476,16 @@ fn main() {
 
             let mut set = tokio::task::JoinSet::new();
 
+            let oc = output_config.clone();
+            let manager = output::Manager::new(quit.clone(), oc);
+
             for i in 0..4 {
                 let quit = quit.clone();
                 let region = region.to_string();
                 let queue = queue.to_string();
+                let mgr = manager.clone();
 
                 set.spawn(async move {
-                    let mgr = output::Manager::new(quit.clone());
-
                     let exec = Executor::new(&region, &queue,
                         recv_max_msgs, recv_pollwait_sec,
                         recv_idle_sec, recv_queue_len, workers, mgr).await;
