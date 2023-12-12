@@ -4,7 +4,6 @@ use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::VecDeque;
-use std::cell::OnceCell;
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio::io::{Error, ErrorKind};
@@ -208,6 +207,7 @@ impl Executor {
         tasks
     }
 
+    #[allow(dead_code)]
     async fn del_msg(&self, receipt: &str) -> Result<(), Error> {
 
         let res = self.client
@@ -485,7 +485,7 @@ fn main() {
 
             let mut set = tokio::task::JoinSet::new();
 
-            for i in 0..executors {
+            for _ in 0..executors {
                 let quit = quit.clone();
                 let region = region.to_string();
                 let queue = queue.to_string();

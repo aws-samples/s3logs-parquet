@@ -1,17 +1,16 @@
-use std::io::BufRead;
 use std::collections::{HashMap, BTreeMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::io::AsyncWrite;
-use tokio::io::{Error, ErrorKind};
-use tokio::io::{BufReader, AsyncReadExt, AsyncWriteExt, AsyncBufReadExt};
+use tokio::io::Error;
+use tokio::io::{BufReader, AsyncWriteExt, AsyncBufReadExt};
 use log::{info, warn, debug, error};
 use arrow::error::Result as ArrowResult;
 use arrow::array::{ArrayRef, StringArray};
 use arrow::record_batch::RecordBatch;
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::SchemaRef;
 use parquet::arrow::async_writer::AsyncArrowWriter;
 use parquet::file::properties::WriterProperties;
 use chrono::prelude::*;
@@ -20,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use rand::distributions::{Alphanumeric, DistString};
 use pcre2::bytes::{RegexBuilder, Regex};
 use config::Config;
-use aws_sdk_sqs::{Client, Region};
+use aws_sdk_sqs::Client;
 use s3logs::utils::LineParser;
 use s3logs::stats::TimeStats;
 use s3logs::transfer::TransferManager;
@@ -271,7 +270,12 @@ impl Receipt {
         }
 
         let mut file = res.unwrap();
-        file.write(&data.into_bytes()).await;
+        match file.write(&data.into_bytes()).await {
+            Ok(_) => {},
+            Err(e) => {
+                panic!("failed to finalize receipt to file {}, err: {}", &self.file_receipt, e);
+            },
+        }
     }
 
     async fn del_sqs_receipt(&self) {
@@ -377,6 +381,7 @@ impl ReceiptGen {
     }
 }
 
+#[allow(dead_code)]
 #[derive(PartialEq)]
 enum ChannelGateState {
     Initialized,
@@ -428,6 +433,7 @@ impl Channel {
         self.rx_count.fetch_add(1, Ordering::SeqCst);
     }
 
+    #[allow(dead_code)]
     fn dec_rx(&self) {
         self.rx_count.fetch_sub(1, Ordering::SeqCst);
     }
@@ -471,10 +477,9 @@ impl Channel {
         };
     }
 
+    #[allow(dead_code)]
     pub async fn close(&mut self) {
-        
         let mut receipts = self.receipts.lock().await;
-
         while let Some(receipt) = receipts.pop() {
             receipt.close().await;
         }
@@ -671,6 +676,7 @@ impl Manager {
         Ok(v)
     }
 
+    #[allow(dead_code)]
     pub fn lines_to_v_s<S>(&self, lines: std::io::Lines<S>) -> Result<Vec<LogFields>>
     where
         S: std::io::BufRead + Unpin
@@ -702,12 +708,11 @@ impl Manager {
         let mut stat = TimeStats::new();
         debug!("start to fetch object s3://{}/{} from region: {}", bucket, key, region);
 
-        let tm = TransferManager::new(region).await;
         let stream = self.tm.download_object(bucket, key).await?;
 
         let lines = BufReader::with_capacity(10*1024*1024, stream.into_async_read()).lines();
         debug!("object s3://{}/{} initialized download cost: {}", bucket, key, stat.elapsed());
-        let mut map = if let Some(re) = &self.re_event_time_key {
+        let map = if let Some(re) = &self.re_event_time_key {
             let caps = re.captures(key.as_bytes()).unwrap();
             if let Some(date) = caps.and_then(|cap| cap.get(1)) {
                 let date_str = std::str::from_utf8(date.as_bytes()).unwrap();
@@ -732,12 +737,11 @@ impl Manager {
         let mut receipt_gen = ReceiptGen::new(sqs_url, client, region, bucket, key, total_partition, sqs_receipt);
 
         let mut line_start = 0;
-        let mut line_count = 0;
 
         for (partition, logs) in map.into_iter() {
 
             let mut receipt = receipt_gen.next().await;
-            line_count = logs.len();
+            let line_count = logs.len();
             receipt.finalize(&self.config.file_receipt_dir, line_start, line_count).await;
 
             self.send_by_partition(partition, logs, receipt).await;
@@ -747,9 +751,9 @@ impl Manager {
         Ok(())
     }
 
-    pub async fn safe_start_output_wr(&self, partition: TimeStamp) -> Option<Channel> {
+    async fn safe_start_output_wr(&self, partition: TimeStamp) -> Option<Channel> {
 
-        if let Ok(permit) = self.permit.acquire().await {
+        if let Ok(_permit) = self.permit.acquire().await {
             // check channels before real start a new one
             if let Some(channel) = self.chans.get(partition).await {
                 // channel exists, no need to create
@@ -762,7 +766,6 @@ impl Manager {
             let res = self.start_output_wr(partition, rx).await;
             if res.is_err() {
                 panic!("failed to start a new output channel task");
-                return None;
             }
             // try again
             if let Some(channel) = self.chans.get(partition).await {
@@ -785,12 +788,15 @@ impl Manager {
         let threshold_lines = self.config.threshold_lines;
         let incomplete_output_dir = self.config.incomplete_output_dir.clone();
 
+        let bucket = self.config.bucket.clone();
+        let prefix = self.config.prefix.clone();
+
         let join = tokio::task::spawn(async move {
 
             let mut final_run = false;
             let mut next_rx = rx;
-            let mut exit = false;
-            let mut receipts: Vec<Receipt> = Vec::new();
+            let mut exit;
+            let mut receipts: Vec<Receipt>;
 
             while quit.load(Ordering::SeqCst) != true {
 
@@ -867,21 +873,21 @@ impl Manager {
                     let uploading_parquet_filepath = format!("{}/{}", &incomplete_output_dir, uploading_filename);
 
                     // 1. rename output file to uploading name
-                    tokio::fs::rename(&incomplete_parquet_filepath, &uploading_parquet_filepath)
+                    let _ = tokio::fs::rename(&incomplete_parquet_filepath, &uploading_parquet_filepath)
                         .await
                         .map_err(|e| {
-                            error!("failed to rename {} to {}", incomplete_parquet_filepath, uploading_parquet_filepath);
+                            error!("failed to rename {} to {}, err: {:?}", incomplete_parquet_filepath, uploading_parquet_filepath, e);
                             panic!("unable to rename file");
                         });
 
                     // 2. upload to S3
-                    let key = format!("stream/{}", final_filename);
-                    let res = tm.upload_object(&uploading_parquet_filepath, "ahaparquet", &key, 0).await;
+                    let key = format!("{}/{}", prefix, final_filename);
+                    let res = tm.upload_object(&uploading_parquet_filepath, &bucket, &key, 0).await;
                     if res.is_ok() {
-                        tokio::fs::remove_file(&uploading_parquet_filepath)
+                        let _ = tokio::fs::remove_file(&uploading_parquet_filepath)
                             .await
                             .map_err(|e| {
-                                error!("failed to remove {}", parquet_filepath);
+                                error!("failed to remove {}, err: {:?}", parquet_filepath, e);
                                 panic!("unable to remove file");
                             });
                     } else {
@@ -893,10 +899,10 @@ impl Manager {
                         receipt.close().await;
                     }
                 } else {
-                    tokio::fs::remove_file(&incomplete_parquet_filepath)
+                    let _ = tokio::fs::remove_file(&incomplete_parquet_filepath)
                         .await
                         .map_err(|e| {
-                            error!("failed to remove zero content file {}", incomplete_parquet_filepath);
+                            error!("failed to remove zero content file {}, err: {:?}", incomplete_parquet_filepath, e);
                             panic!("unable to remove zero content file");
                         });
                 }
@@ -921,7 +927,7 @@ impl Manager {
         let mut tasks = self.tasks.lock().await;
         while let Some(task) = tasks.pop() {
             if !task.is_finished() {
-                task.await;
+                let _  = task.await;
             }
         }
     }
@@ -970,7 +976,8 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
     }
 
     // when this function return, output file is closed
-    pub async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<(Vec<LogFields>, Receipt)>, final_run: bool) -> Result<(Reason, Vec<Receipt>)> {
+    async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<(Vec<LogFields>, Receipt)>, final_run: bool)
+            -> Result<(Reason, Vec<Receipt>)> {
 
         debug!("[{}] output_loop started, is final_run {}", partition, final_run);
         let mut reason = Reason::Unkown;
@@ -984,7 +991,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
             match output_channel.try_recv() {
                 Ok((lines, receipt)) => {
                     let count = lines.len();
-                    self.append_lines(lines).await;
+                    let _ = self.append_lines(lines).await;
                     lines_written += count;
                     receipts.push(receipt);
 
@@ -1069,12 +1076,6 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         } else {
             warn!("parquet writer write op failed {:?}", res.unwrap());
         }
-
-        Ok(())
-    }
-
-    pub async fn close(self) -> Result<()> {
-        let _ = self.writer.close().await;
 
         Ok(())
     }
