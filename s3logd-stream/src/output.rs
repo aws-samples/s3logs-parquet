@@ -30,6 +30,7 @@ const DATE_TIME_FMT: &str = "%Y-%m-%d-%H-%M-%S";
 const S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY: &str = r#"(\d{4}-\d{2}-\d{2}-00-00-00)-[A-Z0-9]{16}$"#;
 
 const DEFAULT_HOURLY_PARTITION: bool = false;
+const DEFAULT_DATE_PARTITION_PREFIX: &str = "dt=%Y%m%d";
 const DEFAULT_TIMEZONE: &str = "UTC+0";
 const DEFAULT_THRESHOLD_LINES: u64 = 10000000;
 const DEFAULT_THRESHOLD_MAXIDLE: u64 = 60;
@@ -50,6 +51,7 @@ pub struct OutputConfig {
     prefix: String,
     file_receipt_dir: String,
     incomplete_output_dir: String,
+    date_partition_prefix: String,
     hourly_partition: bool,
     timezone: String,
     threshold_lines: usize,
@@ -97,6 +99,11 @@ impl OutputConfig {
                         .to_owned()
                         .into_string()
                         .expect("incorrect incomplete_output_dir field in config");
+        let date_partition_prefix = table.get("date_partition_prefix")
+                        .unwrap_or(&config::Value::from(DEFAULT_DATE_PARTITION_PREFIX))
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect date_partition_prefix field in config");
         let hourly_partition = table.get("hourly_partition")
                         .unwrap_or(&config::Value::from(DEFAULT_HOURLY_PARTITION))
                         .to_owned()
@@ -153,6 +160,7 @@ impl OutputConfig {
             prefix: prefix,
             file_receipt_dir: file_receipt_dir,
             incomplete_output_dir: incomplete_output_dir,
+            date_partition_prefix: date_partition_prefix,
             hourly_partition: hourly_partition,
             timezone: timezone,
             threshold_lines: threshold_lines as usize,
@@ -790,6 +798,7 @@ impl Manager {
 
         let bucket = self.config.bucket.clone();
         let prefix = self.config.prefix.clone();
+        let date_partition_prefix = self.config.date_partition_prefix.clone();
 
         let join = tokio::task::spawn(async move {
 
@@ -881,7 +890,7 @@ impl Manager {
                         });
 
                     // 2. upload to S3
-                    let key = format!("{}/{}", prefix, final_filename);
+                    let key = format!("{}/{}/{}", prefix, date_partition_prefix, final_filename);
                     let res = tm.upload_object(&uploading_parquet_filepath, &bucket, &key, 0).await;
                     if res.is_ok() {
                         let _ = tokio::fs::remove_file(&uploading_parquet_filepath)
@@ -921,6 +930,12 @@ impl Manager {
         let mut tasks = self.tasks.lock().await;
         tasks.push(join);
         Ok(())
+    }
+
+    // part_ts here is already at target timezone and also aligned to day or hour by config
+    fn get_date_partitioned_prefix(&self, part_ts: PartitionedTimeStamp) -> String {
+        let ndt = NaiveDateTime::from_timestamp_opt(part_ts as i64, 0).expect("failed to convert partitioned timestamp to naive date time");
+        ndt.format(&self.config.date_partition_prefix).to_string()
     }
 
     pub async fn shutdown(&self) {
