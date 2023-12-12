@@ -27,6 +27,7 @@ const DEFAULT_NUM_WORKERS: u64 = 2;
 const DEFAULT_MAX_SQS_MESSAGES: i32 = 10;
 const DEFAULT_WAIT_TIME_SECONDS: i32 = 20;
 const DEFAULT_RECV_IDLE_SECONDS: u64 = 15;
+const DEFAULT_NUM_EXECUTORS: u64 = 1;
 
 struct TaskQueue {
     inner: RwLock<VecDeque<Message>>,
@@ -363,6 +364,11 @@ fn main() {
                         .to_owned()
                         .into_uint()
                         .unwrap();
+    let executors = table.get("num_executors")
+                        .unwrap_or(&config::Value::from(DEFAULT_NUM_EXECUTORS))
+                        .to_owned()
+                        .into_uint()
+                        .unwrap();
     let recv_max_msgs = table.get("max_sqs_messages")
                         .unwrap_or(&config::Value::from(DEFAULT_MAX_SQS_MESSAGES))
                         .to_owned()
@@ -479,7 +485,7 @@ fn main() {
             let oc = output_config.clone();
             let manager = output::Manager::new(quit.clone(), oc);
 
-            for i in 0..4 {
+            for i in 0..executors {
                 let quit = quit.clone();
                 let region = region.to_string();
                 let queue = queue.to_string();
