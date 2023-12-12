@@ -168,6 +168,9 @@ impl Executor {
                     // queue almost full, sleep for a while
                     trace!("recv queue {}/{} sleep {} seconds", qlen, self.recv_queue_len, self.recv_idle_sec);
                     sleep(Duration::from_secs(self.recv_idle_sec)).await;
+                    if quit.load(Ordering::SeqCst) {
+                        break;
+                    }
                 } else {
                     // poll new messages to fill up queue
                     break;
