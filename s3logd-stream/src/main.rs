@@ -482,16 +482,15 @@ fn main() {
 
             let mut set = tokio::task::JoinSet::new();
 
-            let oc = output_config.clone();
-            let manager = output::Manager::new(quit.clone(), oc);
 
             for i in 0..executors {
                 let quit = quit.clone();
                 let region = region.to_string();
                 let queue = queue.to_string();
-                let mgr = manager.clone();
+                let oc = output_config.clone();
 
                 set.spawn(async move {
+                    let mgr = output::Manager::new(quit.clone(), oc);
                     let exec = Executor::new(&region, &queue,
                         recv_max_msgs, recv_pollwait_sec,
                         recv_idle_sec, recv_queue_len, workers, mgr).await;
