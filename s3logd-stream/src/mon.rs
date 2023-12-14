@@ -7,8 +7,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::error::TryRecvError;
 
 pub(crate) enum DataType {
-    Uninitialized = 0,
-    ProcessS3,
+    ProcessS3 = 1,
+    LinesWritten,
     Max,
 }
 
@@ -22,6 +22,13 @@ impl DataPoint {
         Self {
             type_: DataType::ProcessS3,
             value: start.elapsed().as_millis() as usize,
+        }
+    }
+
+    pub fn to_lines_written(lines: usize) -> Self {
+        Self {
+            type_: DataType::LinesWritten,
+            value: lines,
         }
     }
 }
@@ -146,13 +153,17 @@ pub(crate) async fn mon_task(quit: Arc<AtomicBool>, mut rx: UnboundedReceiver<Da
             let (s, total) = metric.get_stats(DataType::ProcessS3);
             let ((s5, total5), (s15, total15)) = metric.get_min_stats(DataType::ProcessS3);
 
-            if total - last_stat.1 <= 0 {
+            let (l, _) = metric.get_stats(DataType::LinesWritten);
+            let ((l5, _), (l15, _)) = metric.get_min_stats(DataType::LinesWritten);
+
+            if total < last_stat.1 {
                 println!("MON - * - 5min {} - 15min {}", s5, s15);
                 println!("FPS - * - 5min {:.2} - 15min {:.2}", total5 as f64/300.0, total15 as f64/900.0);
             } else {
                 println!("MON - {} - 5min {} - 15min {}", s, s5, s15);
                 println!("FPS - {:.2} - 5min {:.2} - 15min {:.2}", (total-last_stat.1) as f64/5.0, total5 as f64/300.0, total15 as f64/900.0);
             }
+            println!("LinesWritten - {} - 5min {} - 15min {}", l, l5, l15);
 
             last = now;
             last_stat = (s, total);

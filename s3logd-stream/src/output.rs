@@ -46,6 +46,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
 type TimeStamp = usize;
 type PartitionedTimeStamp = usize;
+type MonChannel = UnboundedSender<mon::DataPoint>;
 
 #[derive(Clone)]
 pub struct OutputConfig {
@@ -806,6 +807,7 @@ impl Manager {
         let bucket = self.config.bucket.clone();
         let prefix = self.config.prefix.clone();
         let date_partition_prefix = self.get_date_partitioned_prefix(partition);
+        let mon_channel = self.mon_channel.clone();
 
         let join = tokio::task::spawn(async move {
 
@@ -832,7 +834,7 @@ impl Manager {
                 let wr = AsyncParquetOutput::new(parquet_file, &incomplete_parquet_filepath,
                     buffer_size, schema_ref.clone(), writer_props.clone(), ctx, threshold_maxidle, threshold_lines);
 
-                match wr.output_loop(partition, next_rx.clone(), final_run).await {
+                match wr.output_loop(partition, next_rx.clone(), final_run, mon_channel.clone()).await {
                     Ok((Reason::Unkown, _)) => {
                         panic!("[{}] output loop return reason unkown, why?", partition);
                     },
@@ -998,8 +1000,8 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
     }
 
     // when this function return, output file is closed
-    async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<(Vec<LogFields>, Receipt)>, final_run: bool)
-            -> Result<(Reason, Vec<Receipt>)> {
+    async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<(Vec<LogFields>, Receipt)>,
+            final_run: bool, mon_channel: MonChannel) -> Result<(Reason, Vec<Receipt>)> {
 
         debug!("[{}] output_loop started, is final_run {}", partition, final_run);
         let mut reason = Reason::Unkown;
@@ -1007,6 +1009,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         let mut last_activity = std::time::SystemTime::now();
         let mut total = TimeStats::new();
         let mut receipts: Vec<Receipt> = Vec::new();
+        let start = Instant::now();
 
         while self.ctx.quit.load(Ordering::SeqCst) != true {
 
@@ -1064,6 +1067,9 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         info!("[{}] {} lines written to parquet file {} reason {:?} cost {}", partition, lines_written, self.file_path, reason, total.elapsed());
         if lines_written == 0 {
             assert!(receipts.len() == 0);
+        } else {
+            let lps = lines_written/start.elapsed().as_secs() as usize;
+            let _ = mon_channel.send(mon::DataPoint::to_lines_written(lps));
         }
 
         Ok((reason, receipts))
