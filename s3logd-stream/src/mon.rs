@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::error::TryRecvError;
 
 pub(crate) enum DataType {
-    Uninitialized,
+    Uninitialized = 0,
     ProcessS3,
     Max,
 }
@@ -40,7 +40,7 @@ impl Metric {
 
         let mut min = HashMap::new();
 
-        for i in 0..DataType::Max as usize {
+        for i in 1..DataType::Max as usize {
             let mut v = VecDeque::with_capacity(15);
             for _ in 0..15 {
                 v.push_back((0,0));
@@ -67,7 +67,7 @@ impl Metric {
             return;
         }
 
-        for i in 0..DataType::Max as usize {
+        for i in 1..DataType::Max as usize {
             let (val, count) = self.inner[i];
 
             if let Some(vque) = self.min.get_mut(&i) {
@@ -76,8 +76,8 @@ impl Metric {
                 } else {
                     panic!("unable to get {} from min hash", i);
                 }
+                assert!(vque.len() == 15);
             }
-            assert!(self.min.len() == 15);
             self.inner[i] = (0, 0);
         }
         self.last = now;
