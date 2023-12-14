@@ -85,7 +85,7 @@ impl Metric {
 
     fn get_stats(&self, t: DataType) -> usize {
         let (val, cnt) = self.inner[t as usize];
-        val/cnt
+        val.checked_div(cnt).unwrap_or_default()
     }
 
     fn get_min_stats(&self, t: DataType) -> (usize, usize) {
@@ -101,14 +101,14 @@ impl Metric {
             for (v, c) in vec5.iter() {
                 val += v; cnt += c;
             }
-            min5 = val/cnt;
+            min5 = val.checked_div(cnt).unwrap_or_default();
 
             val = 0;
             cnt = 0;
             for (v, c) in vec15.iter() {
                 val += v; cnt += c;
             }
-            min15 = val/cnt;
+            min15 = val.checked_div(cnt).unwrap_or_default();
         }
         (min5, min15)
     }
