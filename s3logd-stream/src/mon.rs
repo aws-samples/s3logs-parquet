@@ -61,10 +61,10 @@ impl Metric {
         self.inner[index] = (oldval+dp.value, oldcount+1);
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         let now = Instant::now();
         if now.duration_since(self.last) < Duration::new(60, 0) {
-            return;
+            return false;
         }
 
         for i in 1..DataType::Max as usize {
@@ -81,6 +81,7 @@ impl Metric {
             self.inner[i] = (0, 0);
         }
         self.last = now;
+        return true;
     }
 
     // (metric, total_count)
@@ -141,14 +142,13 @@ pub(crate) async fn mon_task(quit: Arc<AtomicBool>, mut rx: UnboundedReceiver<Da
         }
 
         let now = Instant::now();
-        if now.duration_since(last) >= Duration::new(5, 0) {
+        if now.duration_since(last) >= Duration::new(5, 0) && metric.update() == false {
             let (s, total) = metric.get_stats(DataType::ProcessS3);
             let ((s5, total5), (s15, total15)) = metric.get_min_stats(DataType::ProcessS3);
             println!("MON - {} - 5min {} - 15min {}", s, s5, s15);
             println!("FPS - {:.2} - 5min {:.2} - 15min {:.2}", (total-last_stat.1) as f64/ 5.0, total5 as f64/300.0, total15 as f64/900.0);
             last = now;
             last_stat = (s, total);
-            metric.update();
         }
     }
 }
