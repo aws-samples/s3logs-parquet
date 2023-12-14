@@ -3,18 +3,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::VecDeque;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration, Instant};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::error::TryRecvError;
 
 pub(crate) enum DataType {
     Uninitialized,
-    LogDownload,
+    ProcessS3,
     Max,
 }
 
 pub(crate) struct DataPoint {
     type_: DataType,
     value: usize,
+}
+
+impl DataPoint {
+    pub fn to_process_s3(start: Instant) -> Self {
+        Self {
+            type_: DataType::ProcessS3,
+            value: start.elapsed().as_secs() as usize,
+        }
+    }
 }
 
 //(value, count) pair
@@ -53,7 +62,7 @@ impl Metric {
     }
 
     fn update(&mut self) {
-        let mut now = Instant::now();
+        let now = Instant::now();
         if now.duration_since(self.last) < Duration::new(60, 0) {
             return;
         }
@@ -107,6 +116,7 @@ impl Metric {
 
 pub(crate) async fn mon_task(quit: Arc<AtomicBool>, mut rx: UnboundedReceiver<DataPoint>) {
 
+    let last = Instant::now();
     let mut metric = Metric::new();
 
     while quit.load(Ordering::SeqCst) != true {
@@ -123,5 +133,12 @@ pub(crate) async fn mon_task(quit: Arc<AtomicBool>, mut rx: UnboundedReceiver<Da
             },
         }
         metric.update();
+
+        let now = Instant::now();
+        if now.duration_since(last) >= Duration::new(60, 0) {
+            let s = metric.get_stats(DataType::ProcessS3);
+            let (s5, s15) = metric.get_min_stats(DataType::ProcessS3);
+            println!("MON - {} - 5min {} - 15min {}", s, s5, s15);
+        }
     }
 }

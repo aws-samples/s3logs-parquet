@@ -6,6 +6,8 @@ use tokio::task::JoinHandle;
 use tokio::io::AsyncWrite;
 use tokio::io::Error;
 use tokio::io::{BufReader, AsyncWriteExt, AsyncBufReadExt};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::Instant;
 use log::{info, warn, debug, error};
 use arrow::error::Result as ArrowResult;
 use arrow::array::{ArrayRef, StringArray};
@@ -24,6 +26,7 @@ use s3logs::utils::LineParser;
 use s3logs::stats::TimeStats;
 use s3logs::transfer::TransferManager;
 use crate::conf::ParquetWriterConfigReader;
+use crate::mon;
 
 const S3_LOG_DATETIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
 const DATE_TIME_FMT: &str = "%Y-%m-%d-%H-%M-%S";
@@ -574,11 +577,12 @@ pub struct Manager {
     permit: Arc<tokio::sync::Semaphore>,
     tm: TransferManager,
     re_event_time_key: Option<Regex>,
+    mon_channel: UnboundedSender<mon::DataPoint>,
 }
 
 impl Manager {
 
-    pub fn new(quit: Arc<AtomicBool>, config: OutputConfig) -> Self {
+    pub(crate) fn new(quit: Arc<AtomicBool>, monchan: UnboundedSender<mon::DataPoint>, config: OutputConfig) -> Self {
 
         let message_type = std::fs::read_to_string(&config.schema_filepath).expect("unable to read parquet schema config");
         let pq_schema = parquet::schema::parser::parse_message_type(&message_type).expect("Expected valid schema");
@@ -623,6 +627,7 @@ impl Manager {
             permit: Arc::new(tokio::sync::Semaphore::new(1)),
             tm: tm,
             re_event_time_key: re_event_time_key,
+            mon_channel: monchan,
         }
     }
 
@@ -714,6 +719,7 @@ impl Manager {
     pub async fn process_s3(&self, sqs_url: &str, client: Arc<Client>, region: &str, bucket: &str, key: &str, sqs_receipt: &str) -> Result<()> {
 
         let mut stat = TimeStats::new();
+        let start = Instant::now();
         debug!("start to fetch object s3://{}/{} from region: {}", bucket, key, region);
 
         let stream = self.tm.download_object(bucket, key).await?;
@@ -755,6 +761,7 @@ impl Manager {
             self.send_by_partition(partition, logs, receipt).await;
             line_start += line_count;
         }
+        let _ = self.mon_channel.send(mon::DataPoint::to_process_s3(start));
 
         Ok(())
     }

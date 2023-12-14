@@ -1,6 +1,6 @@
 mod output;
 mod conf;
-mod mon;
+pub(crate) mod mon;
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -497,9 +497,10 @@ fn main() {
                 let region = region.to_string();
                 let queue = queue.to_string();
                 let oc = output_config.clone();
+                let monchan = tx.clone();
 
                 set.spawn(async move {
-                    let mgr = output::Manager::new(quit.clone(), oc);
+                    let mgr = output::Manager::new(quit.clone(), monchan, oc);
                     let exec = Executor::new(&region, &queue,
                         recv_max_msgs, recv_pollwait_sec,
                         recv_idle_sec, recv_queue_len, workers, mgr).await;
