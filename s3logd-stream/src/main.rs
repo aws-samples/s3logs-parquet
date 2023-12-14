@@ -1,5 +1,6 @@
 mod output;
 mod conf;
+mod mon;
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -484,6 +485,12 @@ fn main() {
         .block_on(async {
 
             let mut set = tokio::task::JoinSet::new();
+
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let q = quit.clone();
+            set.spawn(async move {
+                mon::mon_task(q, rx).await;
+            });
 
             for _ in 0..executors {
                 let quit = quit.clone();
