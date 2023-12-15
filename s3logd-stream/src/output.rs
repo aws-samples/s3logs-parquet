@@ -40,7 +40,6 @@ const DEFAULT_THRESHOLD_MAXIDLE: u64 = 60;
 const DEFAULT_CHANNEL_CAPACITY: u64 = 100;
 const DEFAULT_CHANNEL_FULL_BUSYWAIT: u64 = 100;
 const DEFAULT_EVENT_TIME_KEY_FORMAT: bool = true;
-const DEFAULT_PASSTHROUGH_MODE: bool = true;
 
 pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
@@ -65,7 +64,6 @@ pub struct OutputConfig {
     writer_props_filepath: String,
     schema_filepath: String,
     event_time_key_format: bool,
-    passthrough_mode: bool,
 }
 
 impl OutputConfig {
@@ -153,11 +151,6 @@ impl OutputConfig {
                         .to_owned()
                         .into_bool()
                         .expect("incorrect event_time_key_format field in config");
-        let passthrough_mode = table.get("passthrough_mode")
-                        .unwrap_or(&config::Value::from(DEFAULT_PASSTHROUGH_MODE))
-                        .to_owned()
-                        .into_bool()
-                        .expect("incorrect passthrough_mode field in config");
         Self {
             region: region,
             bucket: bucket,
@@ -174,7 +167,6 @@ impl OutputConfig {
             writer_props_filepath: writer_props_filepath,
             schema_filepath: schema_filepath,
             event_time_key_format: event_time_key_format,
-            passthrough_mode: passthrough_mode,
         }
     }
 }
@@ -577,7 +569,7 @@ pub struct Manager {
     quit: Arc<AtomicBool>,
     permit: Arc<tokio::sync::Semaphore>,
     tm: TransferManager,
-    re_event_time_key: Option<Regex>,
+    re_event_time_key: Option<Regex>, // only set in passthrough mode
     mon_channel: UnboundedSender<mon::DataPoint>,
 }
 
@@ -606,8 +598,11 @@ impl Manager {
             })
         });
 
-        let re_event_time_key = if config.event_time_key_format && config.passthrough_mode {
-            assert!(config.hourly_partition == false);
+        let ptz = tzif::parse_posix_tz_string(&config.timezone.as_bytes());
+        let utc_offset = ptz.unwrap().std_info.offset.0;
+
+        let re_event_time_key = if config.event_time_key_format && utc_offset == 0 && config.hourly_partition == false {
+            info!("create output manager in passthrough mode");
             let re = RegexBuilder::new()
                 .jit(true)
                 .build(S3_LOG_REGEX_DATE_BASED_PARTITION_OBJECT_KEY)
