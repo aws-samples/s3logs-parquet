@@ -952,7 +952,7 @@ impl Manager {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Reason {
     Unkown,
     MaxLinesReached,
@@ -1006,7 +1006,11 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         let mut receipts: Vec<Receipt> = Vec::new();
         let start = Instant::now();
 
-        while self.ctx.quit.load(Ordering::SeqCst) != true {
+        loop {
+
+            if self.ctx.quit.load(Ordering::SeqCst) {
+                reason = Reason::Quit;
+            }
 
             match output_channel.try_recv() {
                 Ok((lines, receipt)) => {
@@ -1015,12 +1019,11 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
                     lines_written += count;
                     receipts.push(receipt);
 
-                    if lines_written >= self.threshold_lines && !final_run {
+                    if lines_written >= self.threshold_lines && !final_run && reason != Reason::Quit {
                         reason = Reason::MaxLinesReached;
                         break;
                     }
                     last_activity = std::time::SystemTime::now();
-                    reason = Reason::Quit;
                     continue;
                 },
                 Err(crossbeam::channel::TryRecvError::Empty) => {
@@ -1036,7 +1039,6 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
                         }
                         break;
                     }
-                    reason = Reason::Quit;
                     continue;
                 },
                 Err(crossbeam::channel::TryRecvError::Disconnected) => {
