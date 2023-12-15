@@ -498,9 +498,10 @@ fn main() {
                 let queue = queue.to_string();
                 let oc = output_config.clone();
                 let monchan = tx.clone();
+                let be_quit = Arc::new(AtomicBool::new(false));
 
                 set.spawn(async move {
-                    let mgr = output::Manager::new(quit.clone(), monchan, oc);
+                    let mgr = output::Manager::new(be_quit.clone(), monchan, oc);
                     let exec = Executor::new(&region, &queue,
                         recv_max_msgs, recv_pollwait_sec,
                         recv_idle_sec, recv_queue_len, workers, mgr).await;

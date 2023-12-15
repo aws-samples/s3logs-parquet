@@ -943,6 +943,11 @@ impl Manager {
     }
 
     pub async fn shutdown(&self) {
+
+        // set quit status
+        self.quit.store(true, Ordering::SeqCst);
+
+        // and wait all task to quit
         let mut tasks = self.tasks.lock().await;
         while let Some(task) = tasks.pop() {
             if !task.is_finished() {
