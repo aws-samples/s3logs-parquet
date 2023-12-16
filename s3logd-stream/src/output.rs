@@ -8,6 +8,7 @@ use tokio::io::Error;
 use tokio::io::{BufReader, AsyncWriteExt, AsyncBufReadExt};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
+use tokio::task::JoinSet;
 use log::{info, warn, debug, error};
 use arrow::error::Result as ArrowResult;
 use arrow::array::{ArrayRef, StringArray};
@@ -24,7 +25,7 @@ use config::Config;
 use aws_sdk_sqs::Client;
 use s3logs::utils::LineParser;
 use s3logs::stats::TimeStats;
-use s3logs::transfer::TransferManager;
+use crate::transfer::TransferManager;
 use crate::conf::ParquetWriterConfigReader;
 use crate::mon;
 
@@ -290,17 +291,16 @@ impl Receipt {
                         .receipt_handle(&self.sqs_receipt)
                         .send()
                         .await;
-        if res.is_err() {
-            match &res {
-                Err(aws_sdk_sqs::types::SdkError::ServiceError { err, ..}) => match err.kind {
-                    _ => warn!("sdk error: {}", err)
+        match res {
+            Ok(_) => {
+            },
+            Err(err) => match err {
+                aws_sdk_sqs::error::SdkError::ServiceError(err) => {
+                    warn!("sdk error: {:?}", err)
                 },
-                Err(e) => {
-                    warn!("error: {}", e)
+                _ => {
                 },
-                _ => panic!(),
-            }
-            panic!("failed to delete sqs receipt");
+            },
         }
     }
 
@@ -908,8 +908,14 @@ impl Manager {
                     }
 
                     // 3. callback all receipts
+                    let mut set = JoinSet::new();
                     while let Some(receipt) = receipts.pop() {
-                        receipt.close().await;
+                        set.spawn( async move {
+                            receipt.close().await
+                        });
+                    }
+                    while let Some(res) = set.join_next().await {
+                        let _ = res;
                     }
                 } else {
                     let _ = tokio::fs::remove_file(&incomplete_parquet_filepath)

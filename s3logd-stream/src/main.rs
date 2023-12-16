@@ -1,5 +1,6 @@
 mod output;
 mod conf;
+mod transfer;
 pub(crate) mod mon;
 use std::process;
 use std::sync::Arc;
@@ -10,8 +11,9 @@ use tokio::sync::RwLock;
 use tokio::io::{Error, ErrorKind};
 use tokio::time::{sleep, Duration};
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_sqs::{Client, Region};
-use aws_sdk_sqs::model::Message;
+use aws_sdk_sqs::Client;
+use aws_sdk_sqs::config::Region;
+use aws_sdk_sqs::types::Message;
 use aws_lambda_events::s3::{S3Event, S3EventRecord};
 use config::Config;
 use structopt::StructOpt;
@@ -78,7 +80,7 @@ impl Executor {
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
 
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region_provider).load().await;
 
         Self {
             client: Arc::new(Client::new(&shared_config)),
@@ -116,23 +118,22 @@ impl Executor {
                         .queue_url(&self.recv_queue)
                         .send()
                         .await;
-        if res.is_err() {
-            match &res {
-                Err(aws_sdk_sqs::types::SdkError::ServiceError { err, ..}) => match err.kind {
-                    _ => println!("sdk error: {}", err)
+        match res {
+            Ok(_) => {
+            },
+            Err(err) => match err {
+                aws_sdk_sqs::error::SdkError::ServiceError(err) => {
+                    warn!("sdk error: {:?}", err);
+                    return Err(Error::new(ErrorKind::Other, "failed to receive messages from queue"));
                 },
-                Err(e) => {
-                    println!("error: {}", e)
+                _ => {
+                    return Err(Error::new(ErrorKind::Other, "failed to receive messages from queue"));
                 },
-                _ => panic!(),
-            }
-            return Err(Error::new(ErrorKind::Other, "failed to receive messages from queue"));
+            },
         }
 
         let output = res.unwrap();
-        let msgs: Vec<Message> = output.messages()
-                                    .unwrap_or_default()
-                                    .to_vec();
+        let msgs: Vec<Message> = output.messages().to_vec();
 
         return Ok(msgs);
     }
@@ -217,20 +218,19 @@ impl Executor {
                         .receipt_handle(receipt)
                         .send()
                         .await;
-        if res.is_err() {
-            match &res {
-                Err(aws_sdk_sqs::types::SdkError::ServiceError { err, ..}) => match err.kind {
-                    _ => warn!("sdk error: {}", err)
+        match res {
+            Ok(_) => {
+                return Ok(())
+            },
+            Err(err) => match err {
+                aws_sdk_sqs::error::SdkError::ServiceError(err) => {
+                    warn!("sdk error: {:?}", err)
                 },
-                Err(e) => {
-                    warn!("error: {}", e)
+                _ => {
                 },
-                _ => panic!(),
-            }
-            return Err(Error::new(ErrorKind::Other, "failed to delete message from queue"));
+            },
         }
-
-        Ok(())
+        return Err(Error::new(ErrorKind::Other, "failed to delete message from queue"));
     }
 
     async fn s3_event_handler(&self, record: S3EventRecord, receipt: String) -> Result<(), Error> {
