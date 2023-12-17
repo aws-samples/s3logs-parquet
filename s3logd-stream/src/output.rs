@@ -41,6 +41,7 @@ const DEFAULT_THRESHOLD_MAXIDLE: u64 = 60;
 const DEFAULT_CHANNEL_CAPACITY: u64 = 100;
 const DEFAULT_CHANNEL_FULL_BUSYWAIT: u64 = 100;
 const DEFAULT_EVENT_TIME_KEY_FORMAT: bool = true;
+const DEFAULT_STORAGE_CLASS: &str = "STANDARD";
 
 pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
@@ -65,6 +66,8 @@ pub struct OutputConfig {
     writer_props_filepath: String,
     schema_filepath: String,
     event_time_key_format: bool,
+    storage_class: String,
+    mpu_chunk_size: u64,
 }
 
 impl OutputConfig {
@@ -152,6 +155,16 @@ impl OutputConfig {
                         .to_owned()
                         .into_bool()
                         .expect("incorrect event_time_key_format field in config");
+        let storage_class = table.get("storage_class")
+                        .unwrap_or(&config::Value::from(DEFAULT_STORAGE_CLASS))
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect storage_class field in config");
+        let mpu_chunk_size = table.get("mpu_chunk_size")
+                        .unwrap_or(&config::Value::from(0))
+                        .to_owned()
+                        .into_uint()
+                        .expect("incorrect mpu_chunk_size field in config");
         Self {
             region: region,
             bucket: bucket,
@@ -168,6 +181,8 @@ impl OutputConfig {
             writer_props_filepath: writer_props_filepath,
             schema_filepath: schema_filepath,
             event_time_key_format: event_time_key_format,
+            storage_class: storage_class,
+            mpu_chunk_size: mpu_chunk_size,
         }
     }
 }
@@ -592,9 +607,11 @@ impl Manager {
         };
 
         let region = config.region.clone();
+        let sc = config.storage_class.clone();
+        let chunk_size = config.mpu_chunk_size;
         let tm = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
-                TransferManager::new(&region).await
+                TransferManager::new(&region, &sc, chunk_size).await
             })
         });
 

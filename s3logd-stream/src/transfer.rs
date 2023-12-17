@@ -1,4 +1,3 @@
-use std::env;
 use std::path::Path;
 use log::{info, warn};
 use tokio::io::{Error, ErrorKind};
@@ -38,7 +37,7 @@ pub struct TransferManager {
 
 impl TransferManager {
 
-    pub async fn new(region: &str) -> Self {
+    pub async fn new(region: &str, sc: &str, mpu_chunk_size: u64) -> Self {
 
         let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
                                                     .or_default_provider()
@@ -47,13 +46,7 @@ impl TransferManager {
         let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region_provider).load().await;
         let client = Client::new(&shared_config);
 
-        let storage_class = env::var("S3LOGS_TRANSFORM_STORAGE_CLASS")
-                            .map(|x| match_storage_class(&x))
-                            .unwrap_or(StorageClass::Standard);
-
-        let mpu_chunk_size = env::var("S3LOGS_TRANSFORM_MPU_CHUNK_SIZE")
-                            .map(|x| x.parse::<u64>().unwrap_or_default())
-                            .unwrap_or_default();
+        let storage_class = match_storage_class(sc);
 
         Self {
             client: client,
