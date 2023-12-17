@@ -626,6 +626,11 @@ impl Manager {
                 .unwrap();
             Some(re)
         } else {
+            warn!("*ONLY* passthrough mode is support");
+            warn!("  - event_time_key_format {}(true), timezone {}(UTC+0), hourly partition {}(false)",
+                config.event_time_key_format, config.timezone, config.hourly_partition);
+            panic!("*ONLY* passthrough mode is support");
+            #[allow(unreachable_code)]
             None
         };
 
