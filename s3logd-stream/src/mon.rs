@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::error::TryRecvError;
+use log::info;
 
 pub(crate) enum DataType {
     ProcessS3 = 1,
@@ -157,13 +158,13 @@ pub(crate) async fn mon_task(quit: Arc<AtomicBool>, mut rx: UnboundedReceiver<Da
             let ((l5, _), (l15, _)) = metric.get_min_stats(DataType::LinesWritten);
 
             if total < last_stat.1 {
-                println!("MON - * - 5min {} - 15min {}", s5, s15);
-                println!("FPS - * - 5min {:.2} - 15min {:.2}", total5 as f64/300.0, total15 as f64/900.0);
+                info!("MON - * - 5min {} - 15min {}", s5, s15);
+                info!("FPS - * - 5min {:.2} - 15min {:.2}", total5 as f64/300.0, total15 as f64/900.0);
             } else {
-                println!("MON - {} - 5min {} - 15min {}", s, s5, s15);
-                println!("FPS - {:.2} - 5min {:.2} - 15min {:.2}", (total-last_stat.1) as f64/5.0, total5 as f64/300.0, total15 as f64/900.0);
+                info!("MON - {} - 5min {} - 15min {}", s, s5, s15);
+                info!("FPS - {:.2} - 5min {:.2} - 15min {:.2}", (total-last_stat.1) as f64/5.0, total5 as f64/300.0, total15 as f64/900.0);
             }
-            println!("LinesWritten - {} - 5min {} - 15min {}", l, l5, l15);
+            info!("LinesWritten - {} - 5min {} - 15min {}", l, l5, l15);
 
             last = now;
             last_stat = (s, total);
