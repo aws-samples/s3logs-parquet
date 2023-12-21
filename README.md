@@ -27,6 +27,8 @@ https://docs.aws.amazon.com/AmazonS3/latest/userguide/LogFormat.html
 
 [```s3log-lambda-transformer```](s3log-lambda-transformer) Lambda implementation of S3 log transformer.
 
+[```s3logd-stream```](s3logd-stream) A standalone process handling S3 access logs in stream manner.
+
 ## How to build
 ### Install Rust
 ```
