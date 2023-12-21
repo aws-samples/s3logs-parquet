@@ -1,15 +1,17 @@
-use std::env;
 use std::path::Path;
 use log::{info, warn};
 use tokio::io::{Error, ErrorKind};
+use tokio::task::JoinSet;
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::{Client, Region};
-use aws_sdk_s3::error::{UploadPartErrorKind, PutObjectErrorKind, GetObjectErrorKind, HeadObjectErrorKind};
-use aws_sdk_s3::model::{CompletedMultipartUpload, CompletedPart};
-use aws_sdk_s3::model::StorageClass;
-use aws_sdk_s3::output::CreateMultipartUploadOutput;
-use aws_smithy_http::byte_stream::{ByteStream, Length};
-use crate::stats::TimeStats;
+use aws_sdk_s3::Client;
+use aws_sdk_s3::config::Region;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::StorageClass;
+use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
+use aws_smithy_types::byte_stream::{ByteStream, Length};
+use s3logs::stats::TimeStats;
 
 const S3_MIN_CHUNK_SIZE: u64 = 5242880;
 const S3_MAX_CHUNK_SIZE: u64 = 5368709120;
@@ -35,22 +37,16 @@ pub struct TransferManager {
 
 impl TransferManager {
 
-    pub async fn new(region: &str) -> Self {
+    pub async fn new(region: &str, sc: &str, mpu_chunk_size: u64) -> Self {
 
         let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
                                                     .or_default_provider()
                                                     .or_else(Region::new("us-west-2"));
 
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region_provider).load().await;
         let client = Client::new(&shared_config);
 
-        let storage_class = env::var("S3LOGS_TRANSFORM_STORAGE_CLASS")
-                            .map(|x| match_storage_class(&x))
-                            .unwrap_or(StorageClass::Standard);
-
-        let mpu_chunk_size = env::var("S3LOGS_TRANSFORM_MPU_CHUNK_SIZE")
-                            .map(|x| x.parse::<u64>().unwrap_or_default())
-                            .unwrap_or_default();
+        let storage_class = match_storage_class(sc);
 
         Self {
             client: client,
@@ -125,52 +121,65 @@ impl TransferManager {
         info!("initial multipart for file {} size {} split to chunk size {} chunk count {}",
                 from, file_size, chunk_size, chunk_count);
 
-        let path = Path::new(from);
         let mut upload_parts: Vec<CompletedPart> = Vec::new();
+        let path = Path::new(from);
 
         let mut stat = TimeStats::new();
+        let mut set = JoinSet::new();
         for chunk_index in 0..chunk_count {
             let this_chunk = if chunk_count - 1 == chunk_index {
                 size_of_last_chunk
             } else {
                 chunk_size
             };
-            let stream = ByteStream::read_from()
-                .path(path)
-                .offset(chunk_index * chunk_size)
-                .length(Length::Exact(this_chunk))
-                .build()
-                .await
-                .unwrap();
-            //Chunk index needs to start at 0, but part numbers start at 1.
-            let part_number = (chunk_index as i32) + 1;
-            let upload_part_res = self.client
-                .upload_part()
-                .bucket(bucket)
-                .key(key)
-                .upload_id(upload_id)
-                .body(stream)
-                .part_number(part_number)
-                .send()
-                .await;
-            if upload_part_res.is_err() {
-                match upload_part_res {
-                    Err(aws_sdk_s3::types::SdkError::ServiceError { err, .. }) => match err.kind {
-                        UploadPartErrorKind::Unhandled(_) => {}
-                        _ => {}
-                    },
-                    Err(e) => Err(e).unwrap(),
-                    _ => panic!(),
-                }
+            let upload_id = upload_id.to_string();
+            let path = path.to_owned();
+            let bucket = bucket.to_string();
+            let key = key.to_string();
+            let client = self.client.clone();
 
+            set.spawn(async move {
+                let stream = ByteStream::read_from()
+                    .path(path)
+                    .offset(chunk_index * chunk_size)
+                    .length(Length::Exact(this_chunk))
+                    .build()
+                    .await
+                    .unwrap();
+                //Chunk index needs to start at 0, but part numbers start at 1.
+                let part_number = (chunk_index as i32) + 1;
+                let upload_part_res = client
+                    .upload_part()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .upload_id(upload_id)
+                    .body(stream)
+                    .part_number(part_number)
+                    .send()
+                    .await;
+                (upload_part_res, part_number)
+            });
+
+            while let Some(Ok((upload_part_res, part_number))) = set.join_next().await {
+                match upload_part_res {
+                    Ok(_) => {
+                        upload_parts.push(
+                            CompletedPart::builder()
+                                .e_tag(upload_part_res.ok().unwrap().e_tag.unwrap_or_default())
+                                .part_number(part_number)
+                                .build(),
+                        );
+                        continue;
+                    },
+                    Err(err) => match err {
+                        aws_sdk_s3::error::SdkError::ServiceError(_) => {
+                        },
+                        _ => {
+                        },
+                    }
+                }
                 return Err(Error::new(ErrorKind::Other, "failed to upload part"));
             }
-            upload_parts.push(
-                CompletedPart::builder()
-                    .e_tag(upload_part_res.ok().unwrap().e_tag.unwrap_or_default())
-                    .part_number(part_number)
-                    .build(),
-            );
         }
         let completed_multipart_upload: CompletedMultipartUpload = CompletedMultipartUpload::builder()
             .set_parts(Some(upload_parts))
@@ -204,23 +213,19 @@ impl TransferManager {
             .body(body.unwrap())
             .send()
             .await;
-        if res.is_err() {
-            match &res {
-                Err(aws_sdk_s3::types::SdkError::ServiceError { err, .. }) => match err.kind {
-                    PutObjectErrorKind::Unhandled(_) => {}
-                    _ => {}
+        match res {
+            Ok(_) => {
+                info!("put object {} success, cost: {}", from, stat.elapsed());
+                return Ok(());
+            },
+            Err(err) => match err {
+                aws_sdk_s3::error::SdkError::ServiceError(_) => {
                 },
-                Err(e) => {
-                    warn!("put object return error {}", e);
+                _ => {
                 },
-                _ => panic!(),
-            }
-            warn!("failed to put object {}, reason: {:?}", from, res);
-            return Err(Error::new(ErrorKind::Other, "failed to upload part"));
+            },
         }
-
-        info!("put object {} success, cost: {}", from, stat.elapsed());
-        Ok(())
+        return Err(Error::new(ErrorKind::Other, "failed to upload part"));
     }
 
     pub async fn download_object(&self, bucket: &str, key: &str) -> Result<ByteStream, Error> {
@@ -230,48 +235,56 @@ impl TransferManager {
                         .key(key)
                         .send()
                         .await;
-        if res.is_err() {
-            match res {
-                Err(aws_sdk_s3::types::SdkError::ServiceError { err, .. }) => match err.kind {
-                    GetObjectErrorKind::InvalidObjectState(_) => {}
-                    GetObjectErrorKind::NoSuchKey(_) => {}
-                    GetObjectErrorKind::Unhandled(_) => {}
-                    _ => {}
+        match res {
+            Ok(output) => {
+                return Ok(output.body);
+            },
+            Err(err) => match err {
+                aws_sdk_s3::error::SdkError::ServiceError(err) => {
+                    match err.err() {
+                        GetObjectError::NoSuchKey(msg) => {
+                            warn!("no such key error {}", msg);
+                        },
+                        GetObjectError::InvalidObjectState(msg) => {
+                            warn!("invalid object state error {}", msg);
+                        },
+                        _ => {
+                        },
+                    }
                 },
-                Err(e) => {
-                    warn!("get object return error {}", e);
+                _ => {
                 },
-                _ => panic!(),
             }
-
-            return Err(Error::new(ErrorKind::Other, "failed to get object from S3"));
         }
-        return Ok(res.ok().unwrap().body);
+        return Err(Error::new(ErrorKind::Other, "failed to get object from S3"));
     }
 
+    #[allow(dead_code)]
     pub async fn head_object(&self, bucket: &str, key: &str) -> Result<(), Error> {
 
         let res = self.client.head_object()
                         .bucket(bucket)
                         .key(key)
                         .send().await;
-        if res.is_err() {
-            match res {
-                Err(aws_sdk_s3::types::SdkError::ServiceError { err, .. }) => match err.kind {
-                    HeadObjectErrorKind::NotFound(_) => {
-                        return Err(Error::new(ErrorKind::NotFound, "object not found"));
+        match res {
+            Ok(_) => {
+                return Ok(());
+            },
+            Err(err) => match err {
+                aws_sdk_s3::error::SdkError::ServiceError(err) => {
+                    match err.err() {
+                        HeadObjectError::NotFound(msg) => {
+                            warn!("object not found {}", msg);
+                            return Err(Error::new(ErrorKind::NotFound, "object not found"));
+                        },
+                        _ => {
+                        }
                     }
-                    HeadObjectErrorKind::Unhandled(_) => {}
-                    _ => {}
                 },
-                Err(e) => {
-                    warn!("head object return error {}", e);
+                _ => {
                 },
-                _ => panic!(),
-            }
-
-            return Err(Error::new(ErrorKind::Other, "unhandled error"));
+            },
         }
-        Ok(())
+        return Err(Error::new(ErrorKind::Other, "unhandled error"));
     }
 }

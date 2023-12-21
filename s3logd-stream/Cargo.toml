@@ -1,0 +1,37 @@
+[package]
+name = "s3logd-stream"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+structopt = "0.3"
+aws-config = "1.1.1"
+aws-sdk-sqs = "1.7.0"
+aws-smithy-types = "1.1.1"
+aws-sdk-s3 = "1.8.0"
+aws_lambda_events = "0.7.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = { version = "0.1", features = ["log"] }
+futures = "0.3.25"
+serde = { version = "1.0.147", features = ["derive"] }
+serde_json = "1.0.87"
+config = "0.13.2"
+daemonize = "0.5.0"
+ctrlc = { version = "3.2.3", features = ["termination"] }
+env_logger = "0.9.1"
+log = "0.4.17"
+flexi_logger = { version = "0.27.2", features = ["async", "compress"] }
+chrono = "0.4.31"
+tzif = "0.2.2"
+rand = "0.8.5"
+crossbeam = "0.8.2"
+pcre2 = "0.2.6"
+arrow = "49.0.0"
+arrow-schema = "49.0.0"
+parquet = { version = "49.0.0", features = ["async"] }
+s3logs = { version = "0.4.0", path = "../s3logs" }
+
+[profile.release]
+panic = 'abort'
