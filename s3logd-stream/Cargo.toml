@@ -28,10 +28,14 @@ tzif = "0.2.2"
 rand = "0.8.5"
 crossbeam = "0.8.2"
 pcre2 = "0.2.6"
-arrow = "49.0.0"
-arrow-schema = "49.0.0"
-parquet = { version = "49.0.0", features = ["async"] }
+arrow = "47.0.0"
+arrow-schema = "47.0.0"
+parquet = { version = "47.0.0", features = ["async"] }
 s3logs = { version = "0.4.0", path = "../s3logs" }
+
+url = "2.5.0"
+arrow-array = "47.0.0"
+deltalake = { version = "0.16.5", features = ["s3"] }
 
 [profile.release]
 panic = 'abort'

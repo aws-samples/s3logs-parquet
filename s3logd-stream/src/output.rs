@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::io::AsyncWrite;
 use tokio::io::Error;
 use tokio::io::{BufReader, AsyncWriteExt, AsyncBufReadExt};
 use tokio::sync::mpsc::UnboundedSender;
@@ -14,7 +13,6 @@ use arrow::error::Result as ArrowResult;
 use arrow::array::{ArrayRef, StringArray};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
-use parquet::arrow::async_writer::AsyncArrowWriter;
 use parquet::file::properties::WriterProperties;
 use chrono::prelude::*;
 use crossbeam::channel::{Sender, Receiver};
@@ -28,6 +26,8 @@ use s3logs::stats::TimeStats;
 use crate::transfer::TransferManager;
 use crate::conf::ParquetWriterConfigReader;
 use crate::mon;
+use crate::arrow_async::AsyncArrowOutput;
+use crate::delta::AsyncDeltaOutput;
 
 const S3_LOG_DATETIME_FMT: &str = "%d/%b/%Y:%H:%M:%S %z";
 const DATE_TIME_FMT: &str = "%Y-%m-%d-%H-%M-%S";
@@ -42,6 +42,7 @@ const DEFAULT_CHANNEL_CAPACITY: u64 = 100;
 const DEFAULT_CHANNEL_FULL_BUSYWAIT: u64 = 100;
 const DEFAULT_EVENT_TIME_KEY_FORMAT: bool = true;
 const DEFAULT_STORAGE_CLASS: &str = "STANDARD";
+const DEFAULT_OUTPUT_FORMAT: &str = "PARQUET"; // "PARQUET" or "DELTALAKE"
 
 pub type Result<T> = std::result::Result<T, Error>;
 type LogFields = Vec<String>;
@@ -68,6 +69,7 @@ pub struct OutputConfig {
     event_time_key_format: bool,
     storage_class: String,
     mpu_chunk_size: u64,
+    output_format: String,
 }
 
 impl OutputConfig {
@@ -165,6 +167,18 @@ impl OutputConfig {
                         .to_owned()
                         .into_uint()
                         .expect("incorrect mpu_chunk_size field in config");
+        let output_format = table.get("output_format")
+                        .unwrap_or(&config::Value::from(DEFAULT_OUTPUT_FORMAT))
+                        .to_owned()
+                        .into_string()
+                        .expect("incorrect output_format field in config");
+
+        // test if date_partition_prefix is delimit by '='
+        let s: Vec<&str> = date_partition_prefix.split('=').collect();
+        if s.len() != 2 {
+            panic!("invalid date_partition_prefix {}, only accept delimit by '='", date_partition_prefix);
+        }
+
         Self {
             region: region,
             bucket: bucket,
@@ -183,6 +197,7 @@ impl OutputConfig {
             event_time_key_format: event_time_key_format,
             storage_class: storage_class,
             mpu_chunk_size: mpu_chunk_size,
+            output_format: output_format,
         }
     }
 }
@@ -823,6 +838,7 @@ impl Manager {
 
         let bucket = self.config.bucket.clone();
         let prefix = self.config.prefix.clone();
+        let output_format = self.config.output_format.clone();
         let date_partition_prefix = self.get_date_partitioned_prefix(partition);
         let mon_channel = self.mon_channel.clone();
 
@@ -839,19 +855,41 @@ impl Manager {
                     quit: quit.clone(),
                 };
 
-                let final_filename = format!("output_{}_{}.parquet", partition, Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
-                let incomplete_filename = format!("{}.incomplete", final_filename);
+                // local var used for output format PARQUET
+                // set to "" if format is DELTALAKE
+                let final_filename;
+                let parquet_filepath;
+                let incomplete_parquet_filepath;
 
-                let parquet_filepath = format!("{}/{}", &incomplete_output_dir, final_filename);
-                let incomplete_parquet_filepath = format!("{}/{}", &incomplete_output_dir, incomplete_filename);
+                let wr = if output_format == "PARQUET" {
+                    final_filename = format!("output_{}_{}.parquet", partition, Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+                    let incomplete_filename = format!("{}.incomplete", final_filename);
 
-                debug!("starting task for output parquet file: {}", incomplete_parquet_filepath);
-                let buffer_size = 100 * 1024 * 1024;
-                let parquet_file = tokio::fs::File::create(&incomplete_parquet_filepath).await.unwrap();
-                let wr = AsyncParquetOutput::new(parquet_file, &incomplete_parquet_filepath,
-                    buffer_size, schema_ref.clone(), writer_props.clone(), ctx, threshold_maxidle, threshold_lines);
+                    parquet_filepath = format!("{}/{}", &incomplete_output_dir, final_filename);
+                    incomplete_parquet_filepath = format!("{}/{}", &incomplete_output_dir, incomplete_filename);
 
-                match wr.output_loop(partition, next_rx.clone(), final_run, mon_channel.clone()).await {
+                    debug!("starting task for output parquet file: {}", incomplete_parquet_filepath);
+                    let buffer_size = 100 * 1024 * 1024;
+                    let buf_wr = tokio::fs::File::create(&incomplete_parquet_filepath).await.unwrap();
+                    AsyncParquetOutput::new_parquet(
+                        buf_wr, &incomplete_parquet_filepath,
+                        buffer_size, schema_ref.clone(), writer_props.clone(),
+                        ctx, threshold_maxidle, threshold_lines
+                    )
+                } else if output_format == "DELTALAKE" {
+                    final_filename = "".to_string();
+                    parquet_filepath = "".to_string();
+                    incomplete_parquet_filepath = "".to_string();
+                    AsyncParquetOutput::new_deltalake(
+                        &date_partition_prefix,
+                        schema_ref.clone(), writer_props.clone(),
+                        ctx, threshold_maxidle, threshold_lines
+                    ).await
+                } else {
+                    panic!("unkown output format {}", output_format);
+                };
+
+                match wr.output_loop(partition, &date_partition_prefix, next_rx.clone(), final_run, mon_channel.clone()).await {
                     Ok((Reason::Unkown, _)) => {
                         panic!("[{}] output loop return reason unkown, why?", partition);
                     },
@@ -902,7 +940,7 @@ impl Manager {
                 }
 
                 debug!("[{}] before channel close", partition);
-                if receipts.len() > 0 {
+                if output_format == "PARQUET" && receipts.len() > 0 {
 
                     let uploading_filename = format!("{}.uploading", final_filename);
                     let uploading_parquet_filepath = format!("{}/{}", &incomplete_output_dir, uploading_filename);
@@ -939,13 +977,26 @@ impl Manager {
                     while let Some(res) = set.join_next().await {
                         let _ = res;
                     }
-                } else {
+                } else if output_format == "PARQUET" {
                     let _ = tokio::fs::remove_file(&incomplete_parquet_filepath)
                         .await
                         .map_err(|e| {
                             error!("failed to remove zero content file {}, err: {:?}", incomplete_parquet_filepath, e);
                             panic!("unable to remove zero content file");
                         });
+                } else if output_format == "DELTALAKE" && receipts.len() > 0 {
+                    // callback all receipts
+                    let mut set = JoinSet::new();
+                    while let Some(receipt) = receipts.pop() {
+                        set.spawn( async move {
+                            receipt.close().await
+                        });
+                    }
+                    while let Some(res) = set.join_next().await {
+                        let _ = res;
+                    }
+                } else if output_format == "DELTALAKE" {
+                    // do nothing
                 }
 
                 if exit == false {
@@ -996,8 +1047,42 @@ enum Reason {
     Quit,
 }
 
-pub struct AsyncParquetOutput<W> {
-    writer: AsyncArrowWriter<W>,
+pub(crate) trait AsyncOutput {
+    async fn write(&mut self, batch: RecordBatch, partition_str: &str) -> Result<()>;
+    async fn close(self) -> Result<()>;
+}
+
+enum OutputFormat {
+    Parquet(AsyncArrowOutput),
+    Deltalake(AsyncDeltaOutput),
+}
+
+impl OutputFormat {
+    async fn write(&mut self, batch: RecordBatch, partition_str: &str) -> Result<()> {
+        match self {
+            OutputFormat::Parquet(o) => {
+                return o.write(batch, partition_str).await;
+            },
+            OutputFormat::Deltalake(o) => {
+                return o.write(batch, partition_str).await;
+            },
+        }
+    }
+
+    async fn close(self) -> Result<()> {
+        match self {
+            OutputFormat::Parquet(o) => {
+                return o.close().await;
+            },
+            OutputFormat::Deltalake(o) => {
+                return o.close().await;
+            },
+        }
+    }
+}
+
+pub struct AsyncParquetOutput {
+    writer: OutputFormat,
     schema_ref: SchemaRef,
     ctx: Context,
     max_fields: usize,
@@ -1006,18 +1091,17 @@ pub struct AsyncParquetOutput<W> {
     threshold_maxidle: u64
 }
 
-impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
+impl AsyncParquetOutput {
 
-    pub fn new(buf_wr: W, file_path: &str, buffer_size: usize, schema_ref: SchemaRef, writer_props: WriterProperties,
+    pub fn new_parquet(buf_wr: tokio::fs::File, file_path: &str,
+            buffer_size: usize, schema_ref: SchemaRef, writer_props: WriterProperties,
             ctx: Context, thr_maxidle: u64, thr_lines: usize) -> Self {
 
         let max = schema_ref.fields.len();
-
-        // build writer
-        let writer = AsyncArrowWriter::try_new(buf_wr, schema_ref.clone(), buffer_size, Some(writer_props.clone())).unwrap();
+        let writer = AsyncArrowOutput::new(buf_wr, buffer_size, schema_ref.clone(), writer_props);
 
         Self {
-            writer: writer,
+            writer: OutputFormat::Parquet(writer),
             schema_ref: schema_ref,
             ctx: ctx,
             max_fields: max,
@@ -1027,8 +1111,25 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         }
     }
 
+    pub async fn new_deltalake(date_partition_prefix: &str, schema_ref: SchemaRef, writer_props: WriterProperties,
+            ctx: Context, thr_maxidle: u64, thr_lines: usize) -> Self {
+
+        let max = schema_ref.fields.len();
+        let writer = AsyncDeltaOutput::new(date_partition_prefix, schema_ref.clone(), writer_props).await;
+
+        Self {
+            writer: OutputFormat::Deltalake(writer),
+            schema_ref: schema_ref,
+            ctx: ctx,
+            max_fields: max,
+            file_path: "".to_string(),
+            threshold_lines: thr_lines,
+            threshold_maxidle: thr_maxidle,
+        }
+    }
+
     // when this function return, output file is closed
-    async fn output_loop(mut self, partition: PartitionedTimeStamp, output_channel: Receiver<(Vec<LogFields>, Receipt)>,
+    async fn output_loop(mut self, partition: PartitionedTimeStamp, date_partition_prefix: &str, output_channel: Receiver<(Vec<LogFields>, Receipt)>,
             final_run: bool, mon_channel: MonChannel) -> Result<(Reason, Vec<Receipt>)> {
 
         debug!("[{}] output_loop started, is final_run {}", partition, final_run);
@@ -1048,7 +1149,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
             match output_channel.try_recv() {
                 Ok((lines, receipt)) => {
                     let count = lines.len();
-                    let _ = self.append_lines(lines).await;
+                    let _ = self.append_lines(lines, date_partition_prefix).await;
                     lines_written += count;
                     receipts.push(receipt);
 
@@ -1119,7 +1220,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         arrays
     }
 
-    pub async fn append_lines(&mut self, v: Vec<LogFields>) -> Result<()> {
+    pub async fn append_lines(&mut self, v: Vec<LogFields>, date_partition_prefix: &str) -> Result<()> {
 
         // FIXME
         let columns = self.vec_to_columns(v).unwrap();
@@ -1127,7 +1228,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncParquetOutput<W> {
         let batch = RecordBatch::try_new(Arc::clone(&self.schema_ref), columns).unwrap();
         debug!("columes to recordbatch cost: {}", stat.elapsed());
         let mut stat = TimeStats::new();
-        let res = self.writer.write(&batch).await;
+        let res = self.writer.write(batch, date_partition_prefix).await;
         debug!("write to parquet cost: {}", stat.elapsed());
         if res.is_ok() {
             return Ok(());

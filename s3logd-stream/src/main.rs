@@ -1,6 +1,8 @@
 mod output;
 mod conf;
 mod transfer;
+mod arrow_async;
+mod delta;
 pub(crate) mod mon;
 use std::process;
 use std::sync::Arc;
